@@ -13,6 +13,7 @@
 import { expect, Page, Response } from '@playwright/test';
 import { TableClass } from '../../../support/entity/TableClass';
 import { getApiContext, redirectToHomePage } from '../../../utils/common';
+import { waitForAllLoadersToDisappear } from '../../../utils/entity';
 import { visitDataQualityTab } from '../../../utils/testCases';
 import { test } from '../../fixtures/pages';
 
@@ -67,6 +68,21 @@ test.describe('Add TestCase New Flow', () => {
     await page.waitForSelector(`[data-id="name"]`, { state: 'visible' });
 
     await expect(page.locator('[data-id="name"]')).toBeVisible();
+
+    // test case name restriction for `:: " >` character
+    const invalidTestCaseNames = ['test::case', 'test"case', 'test>case'];
+    for (const name of invalidTestCaseNames) {
+      await page.getByTestId('test-case-name').fill(name);
+      await page.waitForSelector(`#testCaseFormV1_testName_help`, {
+        state: 'visible',
+      });
+
+      await expect(page.locator('#testCaseFormV1_testName_help')).toHaveText(
+        'Name cannot contain double colons (::), quotes ("), or greater-than symbols (>).'
+      );
+
+      await page.getByTestId('test-case-name').clear();
+    }
 
     await page.getByTestId('test-case-name').fill(`${testTypeId}_test_case`);
     await page.click('[id="root\\/testType"]');
@@ -143,19 +159,23 @@ test.describe('Add TestCase New Flow', () => {
     const testCaseDoc = page.waitForResponse(
       '/locales/en-US/OpenMetadata/TestCaseForm.md'
     );
+    const tableEntityResponse = page.waitForResponse(
+      '/api/v1/search/query?q=*&index=table_search_index*'
+    );
     await page.getByTestId('add-test-case-btn').click();
+    await tableEntityResponse;
     await page.waitForSelector('[data-testid="test-case-form-v1"]', {
       state: 'visible',
     });
     await testCaseDoc;
     await page.waitForLoadState('networkidle');
+    await waitForAllLoadersToDisappear(page);
   };
 
   const visitDataQualityPage = async (page: Page) => {
     await page.goto('/data-quality/test-cases');
-    await page.waitForSelector('[data-testid="loader"]', {
-      state: 'detached',
-    });
+    await page.waitForLoadState('networkidle');
+    await waitForAllLoadersToDisappear(page);
   };
 
   test.beforeEach(async ({ page }) => {
@@ -187,6 +207,10 @@ test.describe('Add TestCase New Flow', () => {
       await createTestCase({
         page,
         ...tableTestCaseDetails,
+      });
+      await page.waitForLoadState('networkidle');
+      await page.waitForSelector('[data-testid="loader"]', {
+        state: 'detached',
       });
 
       await expect(page.getByTestId('entity-header-name')).toHaveText(
@@ -281,7 +305,7 @@ test.describe('Add TestCase New Flow', () => {
     await visitDataQualityTab(page, table);
 
     await page
-      .getByRole('menuitem', {
+      .getByRole('tab', {
         name: 'Data Quality',
       })
       .click();
@@ -290,7 +314,7 @@ test.describe('Add TestCase New Flow', () => {
     await page.waitForSelector('[data-testid="loader"]', { state: 'detached' });
 
     await page.click('[data-testid="profiler-add-table-test-btn"]');
-    await page.click('[data-testid="table"]');
+    await page.getByRole('menuitem', { name: 'Test case' }).click();
     await page.waitForLoadState('networkidle');
 
     await createTestCase({
@@ -299,7 +323,11 @@ test.describe('Add TestCase New Flow', () => {
     });
 
     await page.click('[data-testid="profiler-add-table-test-btn"]');
-    await page.click('[data-testid="column"]');
+    await page.getByRole('menuitem', { name: 'Test case' }).click();
+    await page
+      .getByTestId('select-table-card')
+      .getByText('Column Level')
+      .click();
     await page.waitForLoadState('networkidle');
 
     await selectColumn(page, table.entity.columns[0].name);
@@ -371,7 +399,7 @@ test.describe('Add TestCase New Flow', () => {
     for (const page of [dataConsumerPage, dataStewardPage]) {
       await visitDataQualityPage(page);
 
-      await page.getByTestId('add-test-case-btn').click();
+      await openTestCaseForm(page);
 
       await selectTable(page, table);
 
