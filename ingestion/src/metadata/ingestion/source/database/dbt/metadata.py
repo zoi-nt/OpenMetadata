@@ -119,6 +119,7 @@ class DbtSource(DbtServiceSource):
 
     def __init__(self, config: WorkflowSource, metadata: OpenMetadata):
         super().__init__()
+        logger.info(f"DbtSource from forked repo by Nithin")
         self.config = config
         self.source_config = self.config.sourceConfig.config
         self.metadata = metadata
