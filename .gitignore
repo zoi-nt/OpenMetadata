@@ -171,3 +171,6 @@ hive-mind-prompt-*.txt
 .claude-flow/
 docs
 memory
+
+# Ignore pycache
+**/__pycache__/
