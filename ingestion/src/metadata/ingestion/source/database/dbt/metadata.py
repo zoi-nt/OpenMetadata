@@ -53,6 +53,7 @@ from metadata.generated.schema.type.basic import (
     Timestamp,
     Uuid,
 )
+from metadata.generated.schema.entity.domains.domain import Domain
 from metadata.generated.schema.type.entityLineage import EntitiesEdge, LineageDetails
 from metadata.generated.schema.type.entityLineage import Source as LineageSource
 from metadata.generated.schema.type.entityReference import EntityReference
@@ -492,6 +493,21 @@ class DbtSource(DbtServiceSource):
 
         return None
 
+    def filter_test_based_on_run_results(self, dbt_objects: DbtObjects):
+        unique_ids = set()
+
+        if not dbt_objects.dbt_run_results:
+            return unique_ids
+
+        for run_result in dbt_objects.dbt_run_results:
+            if not (hasattr(run_result, "results") and run_result.results):
+                continue
+
+            for result in run_result.results:
+                if hasattr(result, "unique_id") and result.unique_id:
+                    unique_ids.add(result.unique_id)
+        return unique_ids
+
     # pylint: disable=too-many-locals, too-many-branches
     def yield_data_models(
         self, dbt_objects: DbtObjects
@@ -540,8 +556,11 @@ class DbtSource(DbtServiceSource):
                     if (
                         dbt_objects.dbt_run_results
                         and resource_type == SkipResourceTypeEnum.TEST.value
+                        and self.source_config.dbtUpdateTests
+                        and key in self.filter_test_based_on_run_results(dbt_objects)
                     ):
                         # Test nodes will be processed further in the topology
+                        logger.info(f"Processing DBT test: {key}")
                         self.add_dbt_tests(
                             key,
                             manifest_node=manifest_node,
@@ -553,6 +572,7 @@ class DbtSource(DbtServiceSource):
                     if (
                         dbt_objects.dbt_sources
                         and resource_type == DbtCommonEnum.SOURCE.value
+                        and self.source_config.dbtUpdateSources
                     ):
                         self.add_dbt_sources(
                             key,
@@ -561,7 +581,10 @@ class DbtSource(DbtServiceSource):
                             dbt_objects=dbt_objects,
                         )
 
-                    if resource_type == DbtCommonEnum.EXPOSURE.value:
+                    if (
+                        resource_type == DbtCommonEnum.EXPOSURE.value
+                        and self.source_config.dbtUpdateExposures
+                    ):
                         self.add_dbt_exposure(key, manifest_node, manifest_entities)
                         continue
 
@@ -574,7 +597,40 @@ class DbtSource(DbtServiceSource):
                     if resource_type in [item.value for item in SkipResourceTypeEnum]:
                         logger.debug(f"Skipping DBT node: {key}.")
                         continue
-
+                    
+                    dbt_table_tags_list = []
+                    if manifest_node.meta and self.source_config.dbtUpdateMetaConfigs:
+                        logger.debug(f"Processing DBT meta: {manifest_node.meta}")
+                        dbt_table_tags_list.extend(
+                            self.process_dbt_meta(manifest_node.meta) or []
+                        )
+                        if manifest_node.meta.get("domain"):
+                            allowed_domains = ["customer", "material", "finance", "supplier", "x-domain"]
+                            assert manifest_node.meta.get("domain") in allowed_domains, (
+                                f"Domain {manifest_node.meta.get('domain')} is not allowed must be one of {allowed_domains}"
+                            )
+                            _fqn = f"{manifest_node.database}.{manifest_node.schema_}.{manifest_node.name}"
+                            logger.info(f"Processing DBT domain: {manifest_node.meta.get('domain')} for fqn: {_fqn}")
+                            try:
+                                table_entity: Table = self.metadata.get_by_name(entity=Table, fqn=f"datalake.{_fqn}")
+                                domain: Domain = self.metadata.get_by_name(
+                                    entity=Domain, fqn=manifest_node.meta.get("domain")
+                                )
+                                self.metadata.patch_domain(
+                                    entity=Table,
+                                    source=table_entity,
+                                    domains=EntityReferenceList(
+                                        root=[EntityReference(id=domain.id, type="domain")]
+                                    ),
+                                    force=True,
+                                )
+                            except Exception as exc:
+                                logger.warning(f"Failed to patch domain for fqn: {_fqn}: {exc}")
+                                continue
+                    
+                    if not self.source_config.dbtUpdateLineages:
+                        continue
+                    
                     model_name = get_dbt_model_name(manifest_node)
 
                     # Filter the dbt models based on filter patterns
@@ -593,7 +649,6 @@ class DbtSource(DbtServiceSource):
                     if catalog_entities:
                         catalog_node = catalog_entities.get(key)
 
-                    dbt_table_tags_list = []
                     if manifest_node.tags:
                         manifest_node.tags = self.filter_tags(manifest_node.tags)
                         dbt_table_tags_list = (
@@ -604,11 +659,6 @@ class DbtSource(DbtServiceSource):
                                 include_tags=self.source_config.includeTags,
                             )
                             or []
-                        )
-
-                    if manifest_node.meta:
-                        dbt_table_tags_list.extend(
-                            self.process_dbt_meta(manifest_node.meta) or []
                         )
 
                     dbt_compiled_query = get_dbt_compiled_query(manifest_node)
