@@ -53,6 +53,11 @@
       "type": "boolean",
       "default": false
     },
+    "dbtUpdateSources": {
+      "description": "Optional configuration to update the sources from DBT or not",
+      "type": "boolean",
+      "default": false
+    },
     "dbtUpdateExposures": {
       "description": "Optional configuration to update the exposures from DBT or not",
       "type": "boolean",

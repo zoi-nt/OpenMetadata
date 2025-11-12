@@ -1,4 +1,4 @@
-# Generated from /Users/nithinteekaramanaa/Documents/zoi/projects/kaercher/OpenMetadata/openmetadata-spec/src/main/antlr4/org/openmetadata/schema/JdbcUri.g4 by ANTLR 4.9.3
+# Generated from /Users/nithinteekaramanaa/Documents/zoi/projects/kaercher/OpenMetadata/openmetadata-spec/src/main/antlr4/org/openmetadata/schema/JdbcUri.g4 by ANTLR 4.9.2
 # encoding: utf-8
 from antlr4 import *
 from io import StringIO
@@ -87,7 +87,7 @@ class JdbcUriParser ( Parser ):
 
     def __init__(self, input:TokenStream, output:TextIO = sys.stdout):
         super().__init__(input, output)
-        self.checkVersion("4.9.3")
+        self.checkVersion("4.9.2")
         self._interp = ParserATNSimulator(self, self.atn, self.decisionsToDFA, self.sharedContextCache)
         self._predicates = None
 
