@@ -120,7 +120,6 @@ class DbtSource(DbtServiceSource):
 
     def __init__(self, config: WorkflowSource, metadata: OpenMetadata):
         super().__init__()
-        logger.info(f"DbtSource from forked repo by Nithin")
         self.config = config
         self.source_config = self.config.sourceConfig.config
         self.metadata = metadata
@@ -627,7 +626,7 @@ class DbtSource(DbtServiceSource):
                             except Exception as exc:
                                 logger.warning(f"Failed to patch domain for fqn: {_fqn}: {exc}")
                                 continue
-                    
+
                     if not self.source_config.dbtUpdateLineages:
                         continue
                     
@@ -643,7 +642,7 @@ class DbtSource(DbtServiceSource):
                         self.status.filter(filter_model.model_fqn, filter_model.message)
                         continue
 
-                    logger.debug(f"Processing DBT node: {model_name}")
+                    logger.info(f"Processing DBT node: {model_name}")
 
                     catalog_node = None
                     if catalog_entities:
