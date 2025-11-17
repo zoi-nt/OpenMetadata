@@ -65,6 +65,7 @@ from metadata.ingestion.models.ometa_classification import OMetaTagAndClassifica
 from metadata.ingestion.models.patch_request import PatchedEntity, PatchRequest
 from metadata.ingestion.models.table_metadata import ColumnDescription
 from metadata.ingestion.ometa.client import APIError
+from metadata.ingestion.ometa.models import EntityList
 from metadata.ingestion.ometa.ometa_api import OpenMetadata
 from metadata.ingestion.source.database.column_type_parser import ColumnTypeParser
 from metadata.ingestion.source.database.database_service import DataModelLink
@@ -227,6 +228,25 @@ class DbtSource(DbtServiceSource):
                     f"Error validating DBT Column: {catalog_key}\n"
                     f"Please check if following keys exist for the column node: {REQUIRED_CATALOG_KEYS}"
                 )
+    
+    def get_confidentiality_tags_map(self):
+        """
+        Returns a map of confidentiality tags map based on the parent classification "Tier"
+        """
+        tags : EntityList[Tag] = self.metadata.list_entities(
+            entity=Tag,
+            params={"parent": "Tier"}
+        )
+        return { tag.displayName : tag.fullyQualifiedName for tag in tags.entities }
+
+    def get_available_domains(self):
+        """
+        Returns a list of available domains
+        """
+        domains : EntityList[Domain] = self.metadata.list_entities(
+            entity=Domain,
+        )
+        return [domain.fullyQualifiedName.root for domain in domains.entities]
 
     def validate_dbt_files(self, dbt_files: DbtFiles):
         """
@@ -358,7 +378,7 @@ class DbtSource(DbtServiceSource):
                     for tag_name in dbt_tags_list
                 ]
                 yield from get_ometa_tag_and_classification(
-                    tags=[fqn.split(tag_label)[1] for tag_label in dbt_tag_labels],
+                    tags=[fqn.split(tag_label)[1] for tag_label in set(dbt_tag_labels)],
                     classification_name=self.tag_classification_name,
                     tag_description="dbt Tags",
                     classification_description="dbt classification",
@@ -395,6 +415,9 @@ class DbtSource(DbtServiceSource):
         )
 
     def add_dbt_exposure(self, key: str, manifest_node, manifest_entities):
+        if not self.source_config.dbtUpdateExposures:
+            return
+
         exposure_entity = self.parse_exposure_node(manifest_node)
 
         if exposure_entity:
@@ -488,7 +511,7 @@ class DbtSource(DbtServiceSource):
             )
         except Exception as exc:
             logger.debug(traceback.format_exc())
-            logger.warning(f"Failed to get table entity from OpenMetadata: {exc}")
+            logger.warning(f"Failed to get table entity '{table_fqn}' from OpenMetadata due to: {exc}")
 
         return None
 
@@ -531,6 +554,8 @@ class DbtSource(DbtServiceSource):
             self.context.get().exposures = {}
             self.context.get().dbt_tests = {}
             self.context.get().run_results_generate_time = None
+            self.context.get().confidentiality_tags_map = self.get_confidentiality_tags_map()
+            self.context.get().available_domains = self.get_available_domains()
 
             # Since we'll be processing multiple run_results for a single project
             # we'll only consider the first run_results generated_at time
@@ -582,7 +607,6 @@ class DbtSource(DbtServiceSource):
 
                     if (
                         resource_type == DbtCommonEnum.EXPOSURE.value
-                        and self.source_config.dbtUpdateExposures
                     ):
                         self.add_dbt_exposure(key, manifest_node, manifest_entities)
                         continue
@@ -601,34 +625,26 @@ class DbtSource(DbtServiceSource):
                     if manifest_node.meta and self.source_config.dbtUpdateMetaConfigs:
                         logger.debug(f"Processing DBT meta: {manifest_node.meta}")
                         dbt_table_tags_list.extend(
-                            self.process_dbt_meta(manifest_node.meta) or []
+                            self.process_dbt_meta(manifest_node) or []
                         )
-                        if manifest_node.meta.get("domain"):
-                            allowed_domains = ["customer", "material", "finance", "supplier", "x-domain"]
-                            assert manifest_node.meta.get("domain") in allowed_domains, (
-                                f"Domain {manifest_node.meta.get('domain')} is not allowed must be one of {allowed_domains}"
-                            )
-                            _fqn = f"{manifest_node.database}.{manifest_node.schema_}.{manifest_node.name}"
-                            logger.info(f"Processing DBT domain: {manifest_node.meta.get('domain')} for fqn: {_fqn}")
-                            try:
-                                table_entity: Table = self.metadata.get_by_name(entity=Table, fqn=f"datalake.{_fqn}")
-                                domain: Domain = self.metadata.get_by_name(
-                                    entity=Domain, fqn=manifest_node.meta.get("domain")
-                                )
-                                self.metadata.patch_domain(
-                                    entity=Table,
-                                    source=table_entity,
-                                    domains=EntityReferenceList(
-                                        root=[EntityReference(id=domain.id, type="domain")]
-                                    ),
-                                    force=True,
-                                )
-                            except Exception as exc:
-                                logger.warning(f"Failed to patch domain for fqn: {_fqn}: {exc}")
+                    
+                    if self.source_config.dbtUpdateResourceTags:
+                        dbt_table_tags_list.extend(
+                            self.process_dbt_resource_tags(manifest_node) or []
+                        )
+                    # Skip processing this DBT node if:
+                    # 1. Lineage updates are disabled (dbtUpdateLineages=False), AND
+                    # 2. Either resource tags or regular tags are enabled for updates, AND
+                    # 3. No tags were found to apply (dbt_table_tags_list is empty)
+                    # 
+                    # This optimization avoids unnecessary processing when we're only interested
+                    # in tag updates but there are no tags to update for this particular node.
+                    if ( self.source_config.dbtUpdateLineages 
+                        or self.source_config.dbtUpdateResourceTags
+                        or self.source_config.includeTags):
+                            
+                            if not dbt_table_tags_list:
                                 continue
-
-                    if not self.source_config.dbtUpdateLineages:
-                        continue
                     
                     model_name = get_dbt_model_name(manifest_node)
 
@@ -642,7 +658,7 @@ class DbtSource(DbtServiceSource):
                         self.status.filter(filter_model.model_fqn, filter_model.message)
                         continue
 
-                    logger.info(f"Processing DBT node: {model_name}")
+                    # logger.debug(f"Processing DBT node: {model_name}")
 
                     catalog_node = None
                     if catalog_entities:
@@ -650,7 +666,7 @@ class DbtSource(DbtServiceSource):
 
                     if manifest_node.tags:
                         manifest_node.tags = self.filter_tags(manifest_node.tags)
-                        dbt_table_tags_list = (
+                        tag_labels = (
                             get_tag_labels(
                                 metadata=self.metadata,
                                 tags=manifest_node.tags,
@@ -659,9 +675,7 @@ class DbtSource(DbtServiceSource):
                             )
                             or []
                         )
-
-                    dbt_compiled_query = get_dbt_compiled_query(manifest_node)
-                    dbt_raw_query = get_dbt_raw_query(manifest_node)
+                        dbt_table_tags_list.extend(tag_labels)
 
                     table_fqn = fqn.build(
                         self.metadata,
@@ -672,11 +686,17 @@ class DbtSource(DbtServiceSource):
                         table_name=model_name,
                     )
 
+                    
+
+                    logger.debug(f"Processing DBT node: {model_name} with tags: {dbt_table_tags_list}")               
                     if table_entity := self._get_table_entity(table_fqn=table_fqn):
                         logger.debug(
                             f"Using Table Entity for datamodel: {table_entity.fullyQualifiedName.root}"
                             f"with id {table_entity.id}"
                         )
+
+                        dbt_compiled_query = get_dbt_compiled_query(manifest_node)
+                        dbt_raw_query = get_dbt_raw_query(manifest_node)
                         data_model_link = DataModelLink(
                             table_entity=table_entity,
                             datamodel=DataModel(
@@ -1035,14 +1055,36 @@ class DbtSource(DbtServiceSource):
                 logger.warning(
                     f"Failed to parse the node {upstream_node} to capture lineage: {exc}"
                 )
+    
+    def process_dbt_resource_tags(self, manifest_node):
+        """
+        Method to process DBT resource tags
+        """
+        if not manifest_node.config.model_dump().get('resource_tags'):
+            return []
+        for key, value in manifest_node.config.model_dump().get('resource_tags').items():
+            if key.endswith('/confidentiality'):                        
+                assert value in self.context.get().confidentiality_tags_map.keys(), (
+                    f"Confidentiality {value} not found in confidentiality_tags_map"
+                )
 
-    def process_dbt_meta(self, manifest_meta):
+                return (
+                    get_tag_labels(
+                        metadata=self.metadata,
+                        tags=[self.context.get().confidentiality_tags_map[value].split(fqn.FQN_SEPARATOR)[-1]],
+                        classification_name=self.context.get().confidentiality_tags_map[value].split(fqn.FQN_SEPARATOR)[0],
+                        include_tags=True,
+                    )
+                    or []
+                )
+
+    def process_dbt_meta(self, manifest_node):
         """
         Method to process DBT meta for Tags and GlossaryTerms
         """
         dbt_table_tags_list = []
         try:
-            dbt_meta_info = DbtMeta(**manifest_meta)
+            dbt_meta_info = DbtMeta(**manifest_node.meta)
             if dbt_meta_info.openmetadata and dbt_meta_info.openmetadata.glossary:
                 dbt_table_tags_list.extend(
                     get_tag_labels(
@@ -1064,6 +1106,26 @@ class DbtSource(DbtServiceSource):
                         include_tags=True,
                     )
                     or []
+                )
+            
+            if manifest_node.meta.get("domain"):
+                allowed_domains = self.context.get().available_domains
+                assert manifest_node.meta.get("domain").lower() in allowed_domains, (
+                    f"Domain {manifest_node.meta.get('domain')} is not allowed must be one of {allowed_domains}"
+                )
+                _fqn = f"{manifest_node.database}.{manifest_node.schema_}.{manifest_node.name}"
+                logger.info(f"Processing DBT domain: {manifest_node.meta.get('domain')} for fqn: {_fqn}")
+                table_entity: Table = self.metadata.get_by_name(entity=Table, fqn=f"datalake.{_fqn}")
+                domain: Domain = self.metadata.get_by_name(
+                    entity=Domain, fqn=manifest_node.meta.get("domain").lower()
+                )
+                self.metadata.patch_domain(
+                    entity=Table,
+                    source=table_entity,
+                    domains=EntityReferenceList(
+                        root=[EntityReference(id=domain.id, type="domain")]
+                    ),
+                    force=True,
                 )
 
         except Exception as exc:  # pylint: disable=broad-except
