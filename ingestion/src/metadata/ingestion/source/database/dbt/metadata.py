@@ -48,12 +48,14 @@ from metadata.generated.schema.tests.testDefinition import (
     TestPlatform,
 )
 from metadata.generated.schema.type.basic import (
+    EntityExtension,
     FullyQualifiedEntityName,
     SqlQuery,
     Timestamp,
     Uuid,
 )
 from metadata.generated.schema.entity.domains.domain import Domain
+from metadata.generated.schema.type.customProperty import CustomProperty
 from metadata.generated.schema.type.entityLineage import EntitiesEdge, LineageDetails
 from metadata.generated.schema.type.entityLineage import Source as LineageSource
 from metadata.generated.schema.type.entityReference import EntityReference
@@ -247,6 +249,13 @@ class DbtSource(DbtServiceSource):
             entity=Domain,
         )
         return [domain.fullyQualifiedName.root for domain in domains.entities]
+
+    def get_available_custom_properties(self):
+        """
+        Returns a list of available custom properties
+        """
+        custom_properties = self.metadata.get_entity_custom_properties(entity_type=Table)
+        return custom_properties
 
     def validate_dbt_files(self, dbt_files: DbtFiles):
         """
@@ -556,6 +565,7 @@ class DbtSource(DbtServiceSource):
             self.context.get().run_results_generate_time = None
             self.context.get().confidentiality_tags_map = self.get_confidentiality_tags_map()
             self.context.get().available_domains = self.get_available_domains()
+            self.context.get().available_custom_properties = self.get_available_custom_properties()
 
             # Since we'll be processing multiple run_results for a single project
             # we'll only consider the first run_results generated_at time
@@ -576,6 +586,7 @@ class DbtSource(DbtServiceSource):
                         "value",
                         manifest_node.resource_type,
                     )
+
                     # If the run_results file is passed then only DBT tests will be processed
                     if (
                         dbt_objects.dbt_run_results
@@ -623,10 +634,9 @@ class DbtSource(DbtServiceSource):
                     
                     dbt_table_tags_list = []
                     if manifest_node.meta and self.source_config.dbtUpdateMetaConfigs:
-                        logger.debug(f"Processing DBT meta: {manifest_node.meta}")
                         dbt_table_tags_list.extend(
-                            self.process_dbt_meta(manifest_node) or []
-                        )
+                                self.process_dbt_meta(manifest_node) or []
+                            )
                     
                     if self.source_config.dbtUpdateResourceTags:
                         dbt_table_tags_list.extend(
@@ -1077,6 +1087,38 @@ class DbtSource(DbtServiceSource):
                     )
                     or []
                 )
+    
+    def process_dbt_custom_properties(self, matching_keys : dict, manifest_node):
+        """
+        Method to process DBT custom properties
+        """
+        try:
+            
+            table_entity: Table = self.metadata.get_by_name(
+                entity=Table, 
+                fqn=f"datalake.{manifest_node.database}.{manifest_node.schema_}.{manifest_node.name}",
+                fields=["extension"])
+            table_entity_copy = deepcopy(table_entity)
+            
+            # Process matching_keys to convert URLs to markdown links
+            processed_keys = {}
+            for key, value in matching_keys.items():
+                if isinstance(value, str) and (value.startswith('http://') or value.startswith('https://')):
+                    # Convert URL to markdown link format
+                    processed_keys[key] = f"[{value}]({value})"
+                else:
+                    processed_keys[key] = value
+            
+            table_entity_copy.extension = EntityExtension(processed_keys)
+            self.metadata.patch(
+                entity=Table,
+                source=table_entity,
+                destination=table_entity_copy,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.debug(traceback.format_exc())
+            logger.warning(f"Failed to process DBT custom properties: {exc}")
+
 
     def process_dbt_meta(self, manifest_node):
         """
@@ -1127,6 +1169,11 @@ class DbtSource(DbtServiceSource):
                     ),
                     force=True,
                 )
+
+            custom_property_keys = [custom_property["name"] for custom_property in self.context.get().available_custom_properties]
+            matching_keys = {key: value for key, value in manifest_node.meta.items() if key in custom_property_keys}
+            if matching_keys:
+                self.process_dbt_custom_properties(matching_keys, manifest_node)
 
         except Exception as exc:  # pylint: disable=broad-except
             logger.debug(traceback.format_exc())
