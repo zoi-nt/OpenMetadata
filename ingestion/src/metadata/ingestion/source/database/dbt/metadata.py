@@ -649,12 +649,14 @@ class DbtSource(DbtServiceSource):
                     # 
                     # This optimization avoids unnecessary processing when we're only interested
                     # in tag updates but there are no tags to update for this particular node.
-                    if ( self.source_config.dbtUpdateLineages 
-                        or self.source_config.dbtUpdateResourceTags
+                    if ( self.source_config.dbtUpdateResourceTags
                         or self.source_config.includeTags):
                             
                             if not dbt_table_tags_list:
                                 continue
+
+                    elif not self.source_config.dbtUpdateLineages:            
+                        continue
                     
                     model_name = get_dbt_model_name(manifest_node)
 
