@@ -1079,6 +1079,7 @@ class DbtSource(DbtServiceSource):
                 assert value in self.context.get().confidentiality_tags_map.keys(), (
                     f"Confidentiality {value} not found in confidentiality_tags_map"
                 )
+                logger.info(f"Processed DBT resource tags for: {manifest_node.name}")
 
                 return (
                     get_tag_labels(
