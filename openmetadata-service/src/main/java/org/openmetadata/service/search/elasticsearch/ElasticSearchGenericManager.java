@@ -21,6 +21,7 @@ import es.co.elastic.clients.elasticsearch.nodes.NodesStatsResponse;
 import es.co.elastic.clients.elasticsearch.nodes.Stats;
 import es.co.elastic.clients.json.JsonData;
 import java.io.IOException;
+import java.io.StringReader;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -109,6 +110,32 @@ public class ElasticSearchGenericManager implements GenericClient {
   }
 
   @Override
+  public void createOrUpdateIndexTemplate(
+      String templateName, String indexPattern, String mappingContent) throws IOException {
+    if (!isClientAvailable) {
+      LOG.error("ElasticSearch client is not available. Cannot create index template.");
+      return;
+    }
+    try {
+      client
+          .indices()
+          .putIndexTemplate(
+              p ->
+                  p.name(templateName)
+                      .indexPatterns(List.of(indexPattern))
+                      .priority(100L)
+                      .template(t -> t.withJson(new StringReader(mappingContent))));
+      LOG.debug("Successfully created/updated index template: {}", templateName);
+    } catch (ElasticsearchException e) {
+      LOG.error("Failed to create/update index template: {}", templateName, e);
+      throw e;
+    } catch (Exception e) {
+      LOG.error("Failed to create/update index template {}", templateName, e);
+      throw e;
+    }
+  }
+
+  @Override
   public void deleteIndexTemplate(String templateName) throws IOException {
     if (!isClientAvailable) {
       LOG.error("ElasticSearch client is not available. Cannot delete index template.");
@@ -161,12 +188,12 @@ public class ElasticSearchGenericManager implements GenericClient {
     try {
       var getIndexResponse = client.indices().get(g -> g.index(indexPattern));
 
-      if (getIndexResponse.result().isEmpty()) {
+      if (getIndexResponse.indices().isEmpty()) {
         LOG.warn("No indices found matching pattern: {}", indexPattern);
         return;
       }
 
-      for (String indexName : getIndexResponse.result().keySet()) {
+      for (String indexName : getIndexResponse.indices().keySet()) {
         try {
           client
               .indices()

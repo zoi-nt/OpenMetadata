@@ -93,8 +93,9 @@ function SpreadsheetDetails({
 }: Readonly<SpreadsheetDetailsProps>) {
   const { t } = useTranslation();
   const { currentUser } = useApplicationStore();
-  const { tab: activeTab = EntityTabs.WORKSHEETS } =
-    useRequiredParams<{ tab: EntityTabs }>();
+  const { tab: activeTab = EntityTabs.WORKSHEETS } = useRequiredParams<{
+    tab: EntityTabs;
+  }>();
   const { fqn: decodedSpreadsheetFQN } = useFqn();
   const navigate = useNavigate();
   const { customizedPage, isLoading } = useCustomPages(PageType.Spreadsheet);
@@ -403,10 +404,7 @@ function SpreadsheetDetails({
   }
 
   return (
-    <PageLayoutV1
-      pageTitle={t('label.entity-detail-plural', {
-        entity: t('label.spreadsheet'),
-      })}>
+    <PageLayoutV1 pageTitle={entityName}>
       <Row gutter={[0, 12]}>
         <Col span={24}>
           <DataAssetsHeader

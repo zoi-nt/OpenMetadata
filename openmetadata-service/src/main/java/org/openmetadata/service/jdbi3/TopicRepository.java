@@ -25,6 +25,9 @@ import static org.openmetadata.service.resources.tags.TagLabelUtil.addDerivedTag
 import static org.openmetadata.service.resources.tags.TagLabelUtil.addDerivedTagsGracefully;
 import static org.openmetadata.service.resources.tags.TagLabelUtil.checkMutuallyExclusive;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -44,6 +47,7 @@ import org.openmetadata.schema.entity.services.MessagingService;
 import org.openmetadata.schema.type.EntityReference;
 import org.openmetadata.schema.type.Field;
 import org.openmetadata.schema.type.Include;
+import org.openmetadata.schema.type.Relationship;
 import org.openmetadata.schema.type.TagLabel;
 import org.openmetadata.schema.type.TaskType;
 import org.openmetadata.schema.type.change.ChangeSource;
@@ -59,6 +63,7 @@ import org.openmetadata.service.resources.topics.TopicResource;
 import org.openmetadata.service.security.mask.PIIMasker;
 import org.openmetadata.service.util.EntityUtil;
 import org.openmetadata.service.util.EntityUtil.Fields;
+import org.openmetadata.service.util.EntityUtil.RelationIncludes;
 import org.openmetadata.service.util.FullyQualifiedName;
 
 public class TopicRepository extends EntityRepository<Topic> {
@@ -91,32 +96,55 @@ public class TopicRepository extends EntityRepository<Topic> {
 
   @Override
   public void prepare(Topic topic, boolean update) {
-    MessagingService messagingService = Entity.getEntity(topic.getService(), "", ALL);
+    var messagingService = (MessagingService) getCachedParentOrLoad(topic.getService(), "", ALL);
     topic.setService(messagingService.getEntityReference());
     topic.setServiceType(messagingService.getServiceType());
   }
 
   @Override
+  protected List<String> getFieldsStrippedFromStorageJson() {
+    return List.of("service");
+  }
+
+  @Override
+  protected ObjectNode storageJsonNode(Topic topic) {
+    ObjectNode node = super.storageJsonNode(topic);
+    JsonNode messageSchema = node.get("messageSchema");
+    if (!(messageSchema instanceof ObjectNode messageSchemaNode)) {
+      return node;
+    }
+    stripSchemaFieldTags(messageSchemaNode.get("schemaFields"));
+    return node;
+  }
+
+  private void stripSchemaFieldTags(JsonNode schemaFields) {
+    if (!(schemaFields instanceof ArrayNode schemaFieldArray)) {
+      return;
+    }
+    for (JsonNode schemaField : schemaFieldArray) {
+      if (!(schemaField instanceof ObjectNode schemaFieldNode)) {
+        continue;
+      }
+      schemaFieldNode.remove("tags");
+      stripSchemaFieldTags(schemaFieldNode.get("children"));
+    }
+  }
+
+  @Override
   public void storeEntity(Topic topic, boolean update) {
-    // Relationships and fields such as service are derived and not stored as part of json
-    EntityReference service = topic.getService();
-    topic.withService(null);
-
-    // Don't store fields tags as JSON but build it on the fly based on relationships
-    List<Field> fieldsWithTags = null;
-    if (topic.getMessageSchema() != null) {
-      fieldsWithTags = topic.getMessageSchema().getSchemaFields();
-      topic.getMessageSchema().setSchemaFields(cloneWithoutTags(fieldsWithTags));
-      topic.getMessageSchema().getSchemaFields().forEach(field -> field.setTags(null));
-    }
-
     store(topic, update);
+  }
 
-    // Restore the relationships
-    if (fieldsWithTags != null) {
-      topic.getMessageSchema().withSchemaFields(fieldsWithTags);
-    }
-    topic.withService(service);
+  @Override
+  public void storeEntities(List<Topic> topics) {
+    storeMany(topics);
+  }
+
+  @Override
+  protected void clearEntitySpecificRelationshipsForMany(List<Topic> entities) {
+    if (entities.isEmpty()) return;
+    List<UUID> ids = entities.stream().map(Topic::getId).toList();
+    deleteToMany(ids, entityType, Relationship.CONTAINS, null);
   }
 
   @Override
@@ -125,7 +153,26 @@ public class TopicRepository extends EntityRepository<Topic> {
   }
 
   @Override
-  public void setFields(Topic topic, Fields fields) {
+  protected void storeEntitySpecificRelationshipsForMany(List<Topic> entities) {
+    List<CollectionDAO.EntityRelationshipObject> relationships = new ArrayList<>();
+    for (Topic topic : entities) {
+      EntityReference service = topic.getService();
+      if (service == null || service.getId() == null) {
+        continue;
+      }
+      relationships.add(
+          newRelationship(
+              service.getId(),
+              topic.getId(),
+              service.getType(),
+              entityType,
+              Relationship.CONTAINS));
+    }
+    bulkInsertRelationships(relationships);
+  }
+
+  @Override
+  public void setFields(Topic topic, Fields fields, RelationIncludes relationIncludes) {
     // Set default service field
     topic.setService(getContainer(topic.getId()));
 
@@ -337,6 +384,11 @@ public class TopicRepository extends EntityRepository<Topic> {
   }
 
   @Override
+  protected EntityReference getParentReference(Topic entity) {
+    return entity.getService();
+  }
+
+  @Override
   public EntityInterface getParentEntity(Topic entity, String fields) {
     if (entity.getService() == null) {
       return null;
@@ -369,7 +421,7 @@ public class TopicRepository extends EntityRepository<Topic> {
   public TaskWorkflow getTaskWorkflow(ThreadContext threadContext) {
     validateTaskThread(threadContext);
     EntityLink entityLink = threadContext.getAbout();
-    if (entityLink.getFieldName().equals("messageSchema")) {
+    if (entityLink.getFieldName() != null && entityLink.getFieldName().equals("messageSchema")) {
       TaskType taskType = threadContext.getThread().getTask().getType();
       if (EntityUtil.isDescriptionTask(taskType)) {
         return new MessageSchemaDescriptionWorkflow(threadContext);
@@ -552,45 +604,99 @@ public class TopicRepository extends EntityRepository<Topic> {
     @Transaction
     @Override
     public void entitySpecificUpdate(boolean consolidatingChanges) {
-      recordChange(
-          "maximumMessageSize", original.getMaximumMessageSize(), updated.getMaximumMessageSize());
-      recordChange(
+      compareAndUpdate(
+          "maximumMessageSize",
+          () -> {
+            recordChange(
+                "maximumMessageSize",
+                original.getMaximumMessageSize(),
+                updated.getMaximumMessageSize());
+          });
+      compareAndUpdate(
           "minimumInSyncReplicas",
-          original.getMinimumInSyncReplicas(),
-          updated.getMinimumInSyncReplicas());
-      // Partitions is a required field. Cannot be null.
-      if (updated.getPartitions() != null) {
-        recordChange("partitions", original.getPartitions(), updated.getPartitions());
-      }
-      recordChange(
-          "replicationFactor", original.getReplicationFactor(), updated.getReplicationFactor());
-      recordChange("retentionTime", original.getRetentionTime(), updated.getRetentionTime());
-      recordChange("retentionSize", original.getRetentionSize(), updated.getRetentionSize());
-      if (updated.getMessageSchema() != null) {
-        recordChange(
-            "messageSchema.schemaText",
-            original.getMessageSchema() == null
-                ? null
-                : original.getMessageSchema().getSchemaText(),
-            updated.getMessageSchema().getSchemaText());
-        recordChange(
-            "messageSchema.schemaType",
-            original.getMessageSchema() == null
-                ? null
-                : original.getMessageSchema().getSchemaType(),
-            updated.getMessageSchema().getSchemaType());
-        updateSchemaFields(
-            "messageSchema.schemaFields",
-            original.getMessageSchema() == null
-                ? new ArrayList<>()
-                : listOrEmpty(original.getMessageSchema().getSchemaFields()),
-            listOrEmpty(updated.getMessageSchema().getSchemaFields()),
-            EntityUtil.schemaFieldMatch);
-      }
-      recordChange("topicConfig", original.getTopicConfig(), updated.getTopicConfig());
-      updateCleanupPolicies(original, updated);
-      recordChange("sourceUrl", original.getSourceUrl(), updated.getSourceUrl());
-      recordChange("sourceHash", original.getSourceHash(), updated.getSourceHash());
+          () -> {
+            recordChange(
+                "minimumInSyncReplicas",
+                original.getMinimumInSyncReplicas(),
+                updated.getMinimumInSyncReplicas());
+          });
+      compareAndUpdate(
+          "partitions",
+          () -> {
+            // Partitions is a required field. Cannot be null.
+            if (updated.getPartitions() != null) {
+              recordChange("partitions", original.getPartitions(), updated.getPartitions());
+            }
+          });
+      compareAndUpdate(
+          "replicationFactor",
+          () -> {
+            recordChange(
+                "replicationFactor",
+                original.getReplicationFactor(),
+                updated.getReplicationFactor());
+          });
+      compareAndUpdate(
+          "retentionTime",
+          () -> {
+            recordChange("retentionTime", original.getRetentionTime(), updated.getRetentionTime());
+          });
+      compareAndUpdate(
+          "retentionSize",
+          () -> {
+            recordChange("retentionSize", original.getRetentionSize(), updated.getRetentionSize());
+          });
+      compareAndUpdate(
+          "messageSchema",
+          () -> {
+            if (updated.getMessageSchema() != null) {
+              recordChange(
+                  "messageSchema.schemaText",
+                  original.getMessageSchema() == null
+                      ? null
+                      : original.getMessageSchema().getSchemaText(),
+                  updated.getMessageSchema().getSchemaText());
+              recordChange(
+                  "messageSchema.schemaType",
+                  original.getMessageSchema() == null
+                      ? null
+                      : original.getMessageSchema().getSchemaType(),
+                  updated.getMessageSchema().getSchemaType());
+              updateSchemaFields(
+                  "messageSchema.schemaFields",
+                  original.getMessageSchema() == null
+                      ? new ArrayList<>()
+                      : listOrEmpty(original.getMessageSchema().getSchemaFields()),
+                  listOrEmpty(updated.getMessageSchema().getSchemaFields()),
+                  EntityUtil.schemaFieldMatch);
+            }
+          });
+      compareAndUpdate(
+          "topicConfig",
+          () -> {
+            recordChange("topicConfig", original.getTopicConfig(), updated.getTopicConfig());
+          });
+      compareAndUpdate(
+          "cleanupPolicies",
+          () -> {
+            updateCleanupPolicies(original, updated);
+          });
+      compareAndUpdate(
+          "sourceUrl",
+          () -> {
+            recordChange("sourceUrl", original.getSourceUrl(), updated.getSourceUrl());
+          });
+      compareAndUpdate(
+          "sourceHash",
+          () -> {
+            recordChange(
+                "sourceHash",
+                original.getSourceHash(),
+                updated.getSourceHash(),
+                false,
+                EntityUtil.objectMatch,
+                false);
+          });
     }
 
     private void updateCleanupPolicies(Topic original, Topic updated) {

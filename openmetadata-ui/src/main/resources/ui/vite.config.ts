@@ -11,6 +11,7 @@
  *  limitations under the License.
  */
 
+import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import { defineConfig, loadEnv } from 'vite';
@@ -26,19 +27,36 @@ export default defineConfig(({ mode }) => {
     env.DEV_SERVER_TARGET ||
     'http://localhost:8585/';
 
-  // Dynamically set base path from environment variable or use '/' as default
-  const basePath = env.BASE_PATH || '/';
-
+  // Use empty base so dynamic imports use relative paths
+  // The actual BASE_PATH is injected at runtime by the Java backend via ${basePath} replacement
   return {
-    base: basePath,
+    base: '',
     plugins: [
       {
         name: 'html-transform',
         transformIndexHtml(html: string) {
-          // Replace ${basePath} in all places except script src (handled by Vite's base config)
-          return html.replace(/\$\{basePath\}/g, basePath);
+          // Don't replace ${basePath} placeholder - it will be replaced at runtime by Java backend
+          // Add ${basePath} prefix to asset paths (with or without leading slash)
+          return html
+            .replace(
+              /(<script[^>]*src=["'])(\.\/)?assets\//g,
+              '$1${basePath}assets/'
+            )
+            .replace(
+              /(<link[^>]*href=["'])(\.\/)?assets\//g,
+              '$1${basePath}assets/'
+            )
+            .replace(
+              /(<img[^>]*src=["'])(\.\/)?assets\//g,
+              '$1${basePath}assets/'
+            )
+            .replace(
+              /(<img[^>]*src=["'])(\.\/)?images\//g,
+              '$1${basePath}images/'
+            );
         },
       },
+      tailwindcss(),
       react(),
       svgr(),
       tsconfigPaths(),
@@ -53,6 +71,15 @@ export default defineConfig(({ mode }) => {
         viteCompression({
           algorithm: 'gzip',
           ext: '.gz',
+          threshold: 1024, // Only compress files larger than 1KB
+          deleteOriginFile: false, // Keep original files for fallback
+        }),
+      mode === 'production' &&
+        viteCompression({
+          algorithm: 'brotliCompress',
+          ext: '.br',
+          threshold: 1024, // Only compress files larger than 1KB
+          deleteOriginFile: false, // Keep original files for fallback
         }),
     ].filter(Boolean),
 
@@ -76,6 +103,16 @@ export default defineConfig(({ mode }) => {
         '@mui/system',
         '@emotion/react',
         '@emotion/styled',
+        'react-aria',
+        'react-aria-components',
+        'react-stately',
+        '@untitledui/icons',
+        '@internationalized/date',
+        '@react-aria/utils',
+        '@react-stately/utils',
+        '@react-types/shared',
+        'tailwind-merge',
+        'react-hook-form',
       ],
     },
 
@@ -90,7 +127,6 @@ export default defineConfig(({ mode }) => {
             path.resolve(__dirname, 'src'),
             path.resolve(__dirname, 'src/styles'),
           ],
-          rewriteUrls: 'all',
         },
       },
     },
@@ -102,10 +138,21 @@ export default defineConfig(({ mode }) => {
         '/api/': {
           target: devServerTarget,
           changeOrigin: true,
+          ws: true,
         },
       },
       watch: {
-        ignored: ['**/node_modules/**', '**/dist/**', '**/playwright/**'],
+        ignored: [
+          '**/node_modules/**',
+          '**/dist/**',
+          '**/playwright/**',
+          // Ignore test-related files so changes to them don't trigger HMR
+          '**/*.test.*',
+          '**/*.spec.*',
+          '**/*.cy.*',
+          '**/__tests__/**',
+          '**/*.mock.*',
+        ],
       },
       fs: {
         strict: false,
@@ -118,6 +165,10 @@ export default defineConfig(({ mode }) => {
       copyPublicDir: true,
       sourcemap: false,
       minify: mode === 'production' ? 'esbuild' : false,
+      cssMinify: 'esbuild',
+      cssCodeSplit: true,
+      reportCompressedSize: false,
+      chunkSizeWarningLimit: 5000,
       rollupOptions: {
         output: {
           manualChunks: {

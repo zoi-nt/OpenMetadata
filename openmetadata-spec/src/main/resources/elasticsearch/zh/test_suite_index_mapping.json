@@ -102,29 +102,11 @@
           }
         }
       },
-      "testCaseResultSummary": {
-        "type": "nested",
-        "properties": {
-          "status": {
-            "type": "keyword"
-          },
-          "testCaseName": {
-            "type": "text",
-            "analyzer": "ik_max_word",
-            "search_analyzer": "ik_smart",
-            "fields": {
-              "keyword": {
-                "type": "keyword",
-                "ignore_above": 256
-              }
-            }
-          },
-          "timestamp": {
-            "type": "long"
-          }
-        }
+      "lastResultTimestamp": {
+        "type": "long"
       },
       "owners": {
+        "type": "nested",
         "properties": {
           "id": {
             "type": "keyword",
@@ -486,6 +468,14 @@
       },
       "descriptionStatus": {
         "type": "keyword"
+      },
+      "ownerDisplayName": {
+        "type": "keyword",
+        "normalizer": "lowercase_normalizer"
+      },
+      "ownerName": {
+        "type": "keyword",
+        "normalizer": "lowercase_normalizer"
       }
     }
   }

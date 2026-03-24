@@ -36,9 +36,13 @@ export const useUserProfile = ({
   name: string;
   isTeam?: boolean;
 }): [string | null, boolean, User | undefined] => {
-  const { userProfilePics, updateUserProfilePics } = useApplicationStore();
+  const cacheKey = name;
+  const user = useApplicationStore((state) => state.userProfilePics[cacheKey]);
 
-  const user = userProfilePics[name];
+  const updateUserProfilePics = useApplicationStore(
+    (state) => state.updateUserProfilePics
+  );
+
   const [profilePic, setProfilePic] = useState(
     getImageWithResolutionAndFallback(
       ImageQuality['6x'],
@@ -59,17 +63,20 @@ export const useUserProfile = ({
   }, [user, profilePic]);
 
   const fetchProfileIfRequired = useCallback(async () => {
-    if (isTeam || userProfilePics[name]) {
+    const currentUserProfilePics =
+      useApplicationStore.getState().userProfilePics;
+
+    if (isTeam || currentUserProfilePics[cacheKey]) {
       isTeam && setProfilePic(IconTeams);
 
       return;
     }
 
-    if (userProfilePicsLoading.includes(name)) {
+    if (userProfilePicsLoading.includes(cacheKey)) {
       return;
     }
 
-    userProfilePicsLoading = [...userProfilePicsLoading, name];
+    userProfilePicsLoading = [...userProfilePicsLoading, cacheKey];
 
     try {
       let user = await getUserByName(name, {
@@ -78,33 +85,35 @@ export const useUserProfile = ({
       user = getUserWithImage(user);
 
       updateUserProfilePics({
-        id: user.name,
+        id: cacheKey,
         user,
       });
-
-      userProfilePicsLoading = userProfilePicsLoading.filter((p) => p !== name);
     } catch (error) {
-      if ((error as AxiosError)?.response?.status === ClientErrors.NOT_FOUND) {
-        // If user not found, add empty user to prevent further requests and infinite loading
+      // Profile images are best-effort. Cache a placeholder on any read failure so avatar loaders
+      // can settle and we do not keep retrying a denied/missing profile forever.
+      if (
+        (error as AxiosError)?.response?.status === ClientErrors.NOT_FOUND ||
+        (error as AxiosError)?.response?.status === ClientErrors.FORBIDDEN ||
+        (error as AxiosError)?.response?.status === ClientErrors.UNAUTHORIZED ||
+        (error as AxiosError)?.response?.status === ClientErrors.BAD_REQUEST ||
+        (error as AxiosError)?.response?.status === ClientErrors.SERVER_ERROR ||
+        (error as AxiosError)?.response?.status === undefined
+      ) {
         updateUserProfilePics({
-          id: name,
+          id: cacheKey,
           user: {
             name,
-            id: name,
+            id: cacheKey,
             email: '',
           },
         });
       }
-
-      userProfilePicsLoading = userProfilePicsLoading.filter((p) => p !== name);
+    } finally {
+      userProfilePicsLoading = userProfilePicsLoading.filter(
+        (p) => p !== cacheKey
+      );
     }
-  }, [
-    updateUserProfilePics,
-    userProfilePics,
-    name,
-    isTeam,
-    userProfilePicsLoading,
-  ]);
+  }, [cacheKey, name, isTeam, updateUserProfilePics]);
 
   useEffect(() => {
     if (!permission) {
@@ -121,7 +130,7 @@ export const useUserProfile = ({
   return [
     profilePic,
     Boolean(
-      !isTeam && isUndefined(user) && userProfilePicsLoading.includes(name)
+      !isTeam && isUndefined(user) && userProfilePicsLoading.includes(cacheKey)
     ),
     user,
   ];

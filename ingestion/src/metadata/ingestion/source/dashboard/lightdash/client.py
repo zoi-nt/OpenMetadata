@@ -14,7 +14,8 @@ REST Auth & Client for Lightdash
 import traceback
 from typing import List
 
-from metadata.ingestion.ometa.client import REST, ClientConfig
+from metadata.ingestion.connections.source_api_client import TrackedREST
+from metadata.ingestion.ometa.client import ClientConfig
 from metadata.ingestion.source.dashboard.lightdash.models import (
     LightdashChart,
     LightdashDashboard,
@@ -32,7 +33,7 @@ class LightdashApiClient:
     API Documentation: https://docs.lightdash.com/api-reference/v1
     """
 
-    client: REST
+    client: TrackedREST
 
     def __init__(self, config):
         self.config = config
@@ -44,7 +45,7 @@ class LightdashApiClient:
             auth_token_mode="ApiKey",
             allow_redirects=True,
         )
-        self.client = REST(client_config)
+        self.client = TrackedREST(client_config, source_name="lightdash")
 
     def get_org(self):
         """GET api/org"""
@@ -117,9 +118,38 @@ class LightdashApiClient:
             )
         return []
 
+    def test_get_dashboards_list(self) -> List[LightdashDashboard]:
+        """
+        Get List of dashboards without exception handling for test connections.
+        This method will raise exceptions to properly fail test connections.
+        """
+        response = self.client.get(
+            f"api/v1/projects/{self.config.projectUUID}/spaces/{self.config.spaceUUID}"
+        )
+        results = response.get("results")
+        if results is None:
+            logger.warning(
+                "Failed to fetch the dashboard list for the Lightdash Connector"
+            )
+            return []
+
+        space_name = results["name"]
+        dashboards_raw = results["dashboards"]
+
+        if len(dashboards_raw) > 0:
+            dashboards_list = []
+            for dashboard in dashboards_raw:
+                dashboards_list.append(
+                    LightdashDashboard(**dashboard, spaceName=space_name)
+                )
+
+            self.add_dashboard_lineage(dashboards_list=dashboards_list)
+            return dashboards_list
+        return []
+
     def get_dashboards_list(self) -> List[LightdashDashboard]:
         """
-        Get List of all charts
+        Get List of all dashboards
         """
 
         try:

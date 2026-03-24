@@ -22,6 +22,7 @@ from looker_sdk.sdk.api40.models import (
     DashboardBase,
     DashboardElement,
     LookmlModelExplore,
+    LookmlModelExploreFieldset,
     Query,
     User,
 )
@@ -262,10 +263,13 @@ class LookerUnitTest(TestCase):
         """
         ref = EntityReference(id=uuid.uuid4(), type="user")
 
-        with patch.object(Looker40SDK, "user", return_value=MOCK_USER), patch.object(
-            OpenMetadata,
-            "get_reference_by_email",
-            return_value=ref,
+        with (
+            patch.object(Looker40SDK, "user", return_value=MOCK_USER),
+            patch.object(
+                OpenMetadata,
+                "get_reference_by_email",
+                return_value=ref,
+            ),
         ):
             self.assertEqual(self.looker.get_owner_ref(MOCK_LOOKER_DASHBOARD), ref)
 
@@ -377,6 +381,93 @@ class LookerUnitTest(TestCase):
             "`BQ-project.dataset.sample_data`",
         )
 
+    def test_resolve_lookml_constants(self):
+        """
+        Check that LookML constants (@{...}) in sql_table_name are resolved from manifest,
+        and unresolved constants are stripped as fallback.
+        """
+        self.looker._lookml_constants_map = {
+            "data_prod_dw_main": "my_dataset",
+            "schema_name": "my_schema",
+        }
+
+        self.assertEqual(
+            self.looker._resolve_lookml_constants(
+                "`@{data_prod_dw_main}.View_Dim_Countries`"
+            ),
+            "`my_dataset.View_Dim_Countries`",
+        )
+
+        self.assertEqual(
+            self.looker._resolve_lookml_constants(
+                "`@{schema_name}.@{data_prod_dw_main}.some_table`"
+            ),
+            "`my_schema.my_dataset.some_table`",
+        )
+
+        # No constants in input — fast path passthrough
+        self.assertEqual(
+            self.looker._resolve_lookml_constants("`dataset.table`"),
+            "`dataset.table`",
+        )
+
+        # Unknown constant is stripped, table name still usable
+        self.assertEqual(
+            self.looker._resolve_lookml_constants("`@{unknown_const}.table`"),
+            "`table`",
+        )
+
+        # Partial resolution: known resolved, unknown stripped
+        self.assertEqual(
+            self.looker._resolve_lookml_constants(
+                "`@{data_prod_dw_main}.@{unknown}.table`"
+            ),
+            "`my_dataset.table`",
+        )
+
+        # Empty constants map — constants stripped, table name still usable
+        self.looker._lookml_constants_map = {}
+        self.assertEqual(
+            self.looker._resolve_lookml_constants(
+                "`@{data_prod_dw_main}.View_Dim_Countries`"
+            ),
+            "`View_Dim_Countries`",
+        )
+
+    def test_resolve_lookml_constants_no_strip(self):
+        """
+        Check that strip_unresolved=False keeps unknown constants as-is
+        (used for derived_table SQL where stripping would produce invalid SQL).
+        """
+        self.looker._lookml_constants_map = {
+            "dataset": "prod_dataset",
+        }
+
+        # Known constant resolved
+        self.assertEqual(
+            self.looker._resolve_lookml_constants(
+                "SELECT * FROM @{dataset}.my_table", strip_unresolved=False
+            ),
+            "SELECT * FROM prod_dataset.my_table",
+        )
+
+        # Unknown constant left as-is
+        self.assertEqual(
+            self.looker._resolve_lookml_constants(
+                "SELECT * FROM @{unknown}.my_table", strip_unresolved=False
+            ),
+            "SELECT * FROM @{unknown}.my_table",
+        )
+
+        # Mixed: known resolved, unknown left as-is
+        self.assertEqual(
+            self.looker._resolve_lookml_constants(
+                "SELECT * FROM @{dataset}.@{unknown_schema}.my_table",
+                strip_unresolved=False,
+            ),
+            "SELECT * FROM prod_dataset.@{unknown_schema}.my_table",
+        )
+
     def test_get_dashboard_sources(self):
         """
         Check how we are building the sources
@@ -406,8 +497,9 @@ class LookerUnitTest(TestCase):
         )
 
         # If no from_entity, return none
-        with patch.object(fqn, "build", return_value=None), patch.object(
-            OpenMetadata, "get_by_name", return_value=None
+        with (
+            patch.object(fqn, "build", return_value=None),
+            patch.object(OpenMetadata, "get_by_name", return_value=None),
         ):
             self.assertIsNone(
                 self.looker.build_lineage_request(source, db_service_name, to_entity)
@@ -420,8 +512,9 @@ class LookerUnitTest(TestCase):
             databaseSchema=EntityReference(id=uuid.uuid4(), type="databaseSchema"),
             columns=[Column(name="id", dataType=DataType.BIGINT)],
         )
-        with patch.object(fqn, "build", return_value=None), patch.object(
-            OpenMetadata, "get_by_name", return_value=table
+        with (
+            patch.object(fqn, "build", return_value=None),
+            patch.object(OpenMetadata, "get_by_name", return_value=table),
         ):
             original_lineage = self.looker.build_lineage_request(
                 source, db_service_name, to_entity
@@ -560,11 +653,7 @@ class LookerUnitTest(TestCase):
         )
         with patch.object(OpenMetadata, "get_by_name", return_value=return_value):
             self.assertEqual(
-                len(list(self.looker.yield_dashboard_usage(MOCK_LOOKER_DASHBOARD))), 1
-            )
-
-            self.assertIsNotNone(
-                list(self.looker.yield_dashboard_usage(MOCK_LOOKER_DASHBOARD))[0].left
+                len(list(self.looker.yield_dashboard_usage(MOCK_LOOKER_DASHBOARD))), 0
             )
 
     def test_derived_view_references(self):
@@ -681,3 +770,175 @@ class LookerUnitTest(TestCase):
 
             # Should return None when exception occurs
             self.assertIsNone(result)
+
+    def test_explore_source_url(self):
+        """
+        Check that sourceUrl is set for LookMlExplore data models
+        """
+        mock_explore = LookmlModelExplore(
+            name="my_explore",
+            model_name="my_model",
+            project_name="my_project",
+            fields=LookmlModelExploreFieldset(dimensions=[], measures=[]),
+        )
+
+        with (
+            patch.object(
+                LookerSource,
+                "register_record_datamodel",
+                return_value=None,
+            ),
+            patch.object(
+                LookerSource,
+                "_build_data_model",
+                return_value=None,
+            ),
+            patch.object(
+                LookerSource,
+                "_get_explore_sql",
+                return_value=None,
+            ),
+        ):
+            results = [
+                r for r in self.looker.yield_bulk_datamodel(mock_explore) if r.right
+            ]
+            explore_result = results[0].right
+            self.assertEqual(
+                explore_result.sourceUrl.root,
+                "https://my-looker.com/explore/my_model/my_explore",
+            )
+
+    def test_view_source_url(self):
+        """
+        Check that sourceUrl is set for LookMlView data models
+        """
+        from unittest.mock import MagicMock
+
+        from metadata.ingestion.source.dashboard.looker.models import LookMlView
+
+        mock_view = LookMlView(
+            name="my_view",
+            source_file="views/my_view.view.lkml",
+        )
+        mock_explore = LookmlModelExplore(
+            name="my_explore",
+            model_name="my_model",
+            project_name="my_project",
+        )
+
+        mock_parser = MagicMock()
+        mock_parser.find_view.return_value = mock_view
+        mock_parser.parsed_files = {}
+
+        with (
+            patch.object(
+                LookerSource,
+                "parser",
+                new_callable=lambda: property(lambda self: {"my_project": mock_parser}),
+            ),
+            patch.object(
+                LookerSource,
+                "register_record_datamodel",
+                return_value=None,
+            ),
+            patch.object(
+                LookerSource,
+                "_build_data_model",
+                return_value=None,
+            ),
+            patch.object(LookerSource, "add_view_lineage", return_value=iter([])),
+        ):
+            results = list(
+                self.looker._process_view(view_name="my_view", explore=mock_explore)
+            )
+            view_result = results[0].right
+            self.assertEqual(
+                view_result.sourceUrl.root,
+                "https://my-looker.com/projects/my_project/files/views/my_view.view.lkml",
+            )
+
+    def test_view_source_url_none_when_no_source_file(self):
+        """
+        Check that sourceUrl is None when view has no source_file
+        """
+        from unittest.mock import MagicMock
+
+        from metadata.ingestion.source.dashboard.looker.models import LookMlView
+
+        mock_view = LookMlView(
+            name="my_view",
+            source_file=None,
+        )
+        mock_explore = LookmlModelExplore(
+            name="my_explore",
+            model_name="my_model",
+            project_name="my_project",
+        )
+
+        mock_parser = MagicMock()
+        mock_parser.find_view.return_value = mock_view
+        mock_parser.parsed_files = {}
+
+        with (
+            patch.object(
+                LookerSource,
+                "parser",
+                new_callable=lambda: property(lambda self: {"my_project": mock_parser}),
+            ),
+            patch.object(
+                LookerSource,
+                "register_record_datamodel",
+                return_value=None,
+            ),
+            patch.object(
+                LookerSource,
+                "_build_data_model",
+                return_value=None,
+            ),
+            patch.object(LookerSource, "add_view_lineage", return_value=iter([])),
+        ):
+            results = list(
+                self.looker._process_view(view_name="my_view", explore=mock_explore)
+            )
+            view_result = results[0].right
+            self.assertIsNone(view_result.sourceUrl)
+
+    def test_chart_source_url_from_query(self):
+        """
+        Check that sourceUrl uses query share_url for charts
+        """
+        result = next(self.looker.yield_dashboard_chart(MOCK_LOOKER_DASHBOARD)).right
+        self.assertEqual(result.sourceUrl.root, "https://my-looker.com/hello")
+
+    def test_chart_source_url_fallback_to_merge(self):
+        """
+        Check that sourceUrl falls back to merge URL when no query
+        """
+        dashboard = LookerDashboard(
+            id="1",
+            title="test",
+            dashboard_elements=[
+                DashboardElement(
+                    id="chart_no_query",
+                    title="chart_title",
+                    type="line",
+                    merge_result_id="merge123",
+                )
+            ],
+        )
+        result = next(self.looker.yield_dashboard_chart(dashboard)).right
+        self.assertEqual(
+            result.sourceUrl.root,
+            "https://my-looker.com/merge?mid=merge123",
+        )
+
+    def test_dashboard_source_url(self):
+        """
+        Check that sourceUrl is set for dashboards
+        """
+        with patch.object(LookerSource, "get_owner_ref", return_value=None):
+            result = next(self.looker.yield_dashboard(MOCK_LOOKER_DASHBOARD)).right
+            self.assertEqual(
+                result.sourceUrl.root,
+                "https://my-looker.com/dashboards/1",
+            )

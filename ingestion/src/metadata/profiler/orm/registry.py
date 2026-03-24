@@ -18,11 +18,10 @@ from enum import Enum
 
 import sqlalchemy
 from sqlalchemy import Date, DateTime, Integer, Numeric, Time
-from sqlalchemy.sql.sqltypes import Concatenable
+from sqlalchemy.sql.sqltypes import Concatenable, LargeBinary, Text
 
 from metadata.generated.schema.entity.data.table import DataType
 from metadata.ingestion.source import sqa_types
-from metadata.profiler.orm.types.bytea_to_string import ByteaToHex
 from metadata.profiler.orm.types.custom_array import CustomArray
 from metadata.profiler.orm.types.custom_datetimerange import CustomDateTimeRange
 from metadata.profiler.orm.types.custom_hex_byte_string import HexByteString
@@ -38,7 +37,7 @@ from metadata.profiler.registry import TypeRegistry
 class CustomTypes(TypeRegistry):
     BYTES = HexByteString
     UUID = UUIDString
-    BYTEA = ByteaToHex
+    BYTEA = HexByteString
     ARRAY = CustomArray
     TIMESTAMP = CustomTimestamp
     IMAGE = CustomImage
@@ -67,6 +66,7 @@ class PythonDialects(Enum):
     Databricks = "databricks"
     Db2 = "db2"
     Doris = "pydoris"
+    StarRocks = "starrocks"
     Druid = "druid"
     DynamoDB = "dynamoDB"
     Glue = "glue"
@@ -75,11 +75,12 @@ class PythonDialects(Enum):
     Impala = "impala"
     IbmDbSa = "ibm_db_sa"
     Ibmi = "ibmi"
+    Informix = "informix"
     MariaDB = "mariadb"
     MSSQL = "mssql"
     MySQL = "mysql"
     Oracle = "oracle"
-    PinotDB = "pinotdb"
+    PinotDB = "pinot"
     Postgres = "postgresql"
     Presto = "presto"
     Redshift = "redshift"
@@ -87,6 +88,7 @@ class PythonDialects(Enum):
     SQLite = "sqlite"
     Snowflake = "snowflake"
     Teradata = "teradatasql"
+    Timescale = "timescale"
     Trino = "trino"
     UnityCatalog = "unitycatalog"
     Vertica = "vertica"
@@ -221,3 +223,17 @@ def is_enum(_type) -> bool:
     if isinstance(_type, DataType):
         return _type.value == DataType.ENUM.value
     return issubclass(_type.__class__, Enum)
+
+
+def is_blob(_type) -> bool:
+    """Check if the type is a binary large object (BLOB/CLOB).
+    On Informix, these types cannot be used in most SQL expressions
+    (COUNT, DISTINCT, GROUP BY, CASE WHEN, etc.), so all profiler
+    metrics are skipped for blob columns via InformixProfilerInterface."""
+    if isinstance(_type, DataType):
+        return _type.value in {
+            DataType.BYTES.value,
+            DataType.BYTEA.value,
+            DataType.TEXT.value,
+        }
+    return isinstance(_type, (HexByteString, LargeBinary, Text))

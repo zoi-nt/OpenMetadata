@@ -81,6 +81,7 @@ import org.openmetadata.service.Entity;
 import org.openmetadata.service.jdbi3.ListFilter;
 import org.openmetadata.service.jdbi3.TableRepository;
 import org.openmetadata.service.limits.Limits;
+import org.openmetadata.service.monitoring.LatencyPhase;
 import org.openmetadata.service.resources.Collection;
 import org.openmetadata.service.resources.EntityResource;
 import org.openmetadata.service.security.Authorizer;
@@ -98,7 +99,7 @@ import org.openmetadata.service.util.FullyQualifiedName;
 @Collection(name = "tables")
 public class TableResource extends EntityResource<Table, TableRepository> {
   private final TableMapper mapper = new TableMapper();
-  public static final String COLLECTION_PATH = "v1/tables/";
+  public static final String COLLECTION_PATH = "/v1/tables/";
   public static final String FIELDS =
       "tableConstraints,tablePartition,usageSummary,owners,customMetrics,columns,sampleData,"
           + "tags,followers,joins,schemaDefinition,dataModel,extension,testSuite,domains,dataProducts,lifeCycle,sourceHash";
@@ -226,11 +227,17 @@ public class TableResource extends EntityResource<Table, TableRepository> {
           @QueryParam("include")
           @DefaultValue("non-deleted")
           Include include) {
-    ListFilter filter =
-        new ListFilter(include)
-            .addQueryParam("database", databaseParam)
-            .addQueryParam("databaseSchema", databaseSchemaParam)
-            .addQueryParam("includeEmptyTestSuite", includeEmptyTestSuite);
+    ListFilter filter = new ListFilter(include);
+    if (databaseParam != null) {
+      filter.addQueryParam("database", databaseParam);
+    }
+    if (databaseSchemaParam != null) {
+      filter.addQueryParam("databaseSchema", databaseSchemaParam);
+    }
+    // Only add includeEmptyTestSuite when it's explicitly false (default is true)
+    if (!includeEmptyTestSuite) {
+      filter.addQueryParam("includeEmptyTestSuite", false);
+    }
     return super.listInternal(
         uriInfo, securityContext, fieldsParam, filter, limitParam, before, after);
   }
@@ -266,8 +273,17 @@ public class TableResource extends EntityResource<Table, TableRepository> {
               schema = @Schema(implementation = Include.class))
           @QueryParam("include")
           @DefaultValue("non-deleted")
-          Include include) {
-    return getInternal(uriInfo, securityContext, id, fieldsParam, include);
+          Include include,
+      @Parameter(
+              description =
+                  "Per-relation include control. Format: field:value,field2:value2. "
+                      + "Example: owners:non-deleted,followers:all. "
+                      + "Valid values: all, deleted, non-deleted. "
+                      + "If not specified for a field, uses the entity's include value.",
+              schema = @Schema(type = "string", example = "owners:non-deleted,followers:all"))
+          @QueryParam("includeRelations")
+          String includeRelations) {
+    return getInternal(uriInfo, securityContext, id, fieldsParam, include, includeRelations);
   }
 
   @GET
@@ -304,8 +320,17 @@ public class TableResource extends EntityResource<Table, TableRepository> {
               schema = @Schema(implementation = Include.class))
           @QueryParam("include")
           @DefaultValue("non-deleted")
-          Include include) {
-    return getByNameInternal(uriInfo, securityContext, fqn, fieldsParam, include);
+          Include include,
+      @Parameter(
+              description =
+                  "Per-relation include control. Format: field:value,field2:value2. "
+                      + "Example: owners:non-deleted,followers:all. "
+                      + "Valid values: all, deleted, non-deleted. "
+                      + "If not specified for a field, uses the entity's include value.",
+              schema = @Schema(type = "string", example = "owners:non-deleted,followers:all"))
+          @QueryParam("includeRelations")
+          String includeRelations) {
+    return getByNameInternal(uriInfo, securityContext, fqn, fieldsParam, include, includeRelations);
   }
 
   @GET
@@ -576,6 +601,7 @@ public class TableResource extends EntityResource<Table, TableRepository> {
                     schema = @Schema(implementation = CsvImportResult.class)))
       })
   public CsvImportResult importCsv(
+      @Context UriInfo uriInfo,
       @Context SecurityContext securityContext,
       @Parameter(description = "Name of the table", schema = @Schema(type = "string"))
           @PathParam("name")
@@ -589,7 +615,7 @@ public class TableResource extends EntityResource<Table, TableRepository> {
           boolean dryRun,
       String csv)
       throws IOException {
-    return importCsvInternal(securityContext, name, csv, dryRun, false);
+    return importCsvInternal(uriInfo, securityContext, name, csv, dryRun, false);
   }
 
   @PUT
@@ -609,6 +635,7 @@ public class TableResource extends EntityResource<Table, TableRepository> {
                     schema = @Schema(implementation = CsvImportResult.class)))
       })
   public Response importCsvAsync(
+      @Context UriInfo uriInfo,
       @Context SecurityContext securityContext,
       @Parameter(description = "Name of the table", schema = @Schema(type = "string"))
           @PathParam("name")
@@ -621,7 +648,7 @@ public class TableResource extends EntityResource<Table, TableRepository> {
           @QueryParam("dryRun")
           boolean dryRun,
       String csv) {
-    return importCsvInternalAsync(securityContext, name, csv, dryRun, false);
+    return importCsvInternalAsync(uriInfo, securityContext, name, csv, dryRun, false);
   }
 
   @DELETE
@@ -795,6 +822,7 @@ public class TableResource extends EntityResource<Table, TableRepository> {
 
   @PUT
   @Path("/{id}/sampleData")
+  @LatencyPhase("tableSampleDataPut")
   @Operation(
       operationId = "addSampleData",
       summary = "Add sample data",
@@ -823,6 +851,7 @@ public class TableResource extends EntityResource<Table, TableRepository> {
 
   @GET
   @Path("/{id}/sampleData")
+  @LatencyPhase("tableSampleDataGet")
   @Operation(
       operationId = "getSampleData",
       summary = "Get sample data",
@@ -853,6 +882,7 @@ public class TableResource extends EntityResource<Table, TableRepository> {
 
   @DELETE
   @Path("/{id}/sampleData")
+  @LatencyPhase("tableSampleDataDelete")
   @Operation(
       operationId = "deleteSampleData",
       summary = "Delete sample data",
@@ -880,6 +910,7 @@ public class TableResource extends EntityResource<Table, TableRepository> {
 
   @PUT
   @Path("/{id}/pipelineObservability")
+  @LatencyPhase("tablePipelineObservabilityPut")
   @Operation(
       operationId = "addPipelineObservability",
       summary = "Add pipeline observability data",
@@ -916,6 +947,7 @@ public class TableResource extends EntityResource<Table, TableRepository> {
 
   @GET
   @Path("/{id}/pipelineObservability")
+  @LatencyPhase("tablePipelineObservabilityGet")
   @Operation(
       operationId = "getPipelineObservability",
       summary = "Get pipeline observability data",
@@ -942,6 +974,7 @@ public class TableResource extends EntityResource<Table, TableRepository> {
 
   @GET
   @Path("/name/{fqn}/pipelineObservability")
+  @LatencyPhase("tablePipelineObservabilityGetByName")
   @Operation(
       operationId = "getPipelineObservabilityByFQN",
       summary = "Get pipeline observability data by table FQN",
@@ -971,6 +1004,7 @@ public class TableResource extends EntityResource<Table, TableRepository> {
 
   @DELETE
   @Path("/{id}/pipelineObservability")
+  @LatencyPhase("tablePipelineObservabilityDelete")
   @Operation(
       operationId = "deletePipelineObservability",
       summary = "Delete pipeline observability data",
@@ -998,6 +1032,7 @@ public class TableResource extends EntityResource<Table, TableRepository> {
 
   @PUT
   @Path("/{id}/pipelineObservability/{pipelineFqn}")
+  @LatencyPhase("tablePipelineObservabilityPutSingle")
   @Operation(
       operationId = "addSinglePipelineObservability",
       summary = "Add or update single pipeline observability data",
@@ -1036,6 +1071,7 @@ public class TableResource extends EntityResource<Table, TableRepository> {
 
   @DELETE
   @Path("/{id}/pipelineObservability/{pipelineFqn}")
+  @LatencyPhase("tablePipelineObservabilityDeleteSingle")
   @Operation(
       operationId = "deleteSinglePipelineObservability",
       summary = "Delete single pipeline observability data",
@@ -1065,6 +1101,7 @@ public class TableResource extends EntityResource<Table, TableRepository> {
 
   @PUT
   @Path("/{id}/tableProfilerConfig")
+  @LatencyPhase("tableProfilerConfigPut")
   @Operation(
       operationId = "addDataProfilerConfig",
       summary = "Add table profile config",
@@ -1093,6 +1130,7 @@ public class TableResource extends EntityResource<Table, TableRepository> {
 
   @GET
   @Path("/{id}/tableProfilerConfig")
+  @LatencyPhase("tableProfilerConfigGet")
   @Operation(
       operationId = "getDataProfilerConfig",
       summary = "Get table profile config",
@@ -1121,6 +1159,7 @@ public class TableResource extends EntityResource<Table, TableRepository> {
 
   @DELETE
   @Path("/{id}/tableProfilerConfig")
+  @LatencyPhase("tableProfilerConfigDelete")
   @Operation(
       operationId = "delete DataProfilerConfig",
       summary = "Delete table profiler config",
@@ -1148,6 +1187,7 @@ public class TableResource extends EntityResource<Table, TableRepository> {
 
   @GET
   @Path("/{fqn}/tableProfile/latest")
+  @LatencyPhase("tableProfileLatestGet")
   @Operation(
       operationId = "Get the latest table and column profile",
       summary = "Get the latest table profile",
@@ -1186,6 +1226,7 @@ public class TableResource extends EntityResource<Table, TableRepository> {
 
   @GET
   @Path("/{fqn}/tableProfile")
+  @LatencyPhase("tableProfileListGet")
   @Operation(
       operationId = "list Profiles",
       summary = "List of table profiles",
@@ -1311,6 +1352,7 @@ public class TableResource extends EntityResource<Table, TableRepository> {
 
   @PUT
   @Path("/{id}/tableProfile")
+  @LatencyPhase("tableProfilePut")
   @Operation(
       operationId = "addDataProfiler",
       summary = "Add table profile data",
@@ -1596,14 +1638,43 @@ public class TableResource extends EntityResource<Table, TableRepository> {
               schema = @Schema(implementation = Include.class))
           @QueryParam("include")
           @DefaultValue("non-deleted")
-          Include include) {
+          Include include,
+      @Parameter(
+              description =
+                  "Sort columns by field. Supported values: 'name' (default), 'ordinalPosition'",
+              schema =
+                  @Schema(
+                      type = "string",
+                      allowableValues = {"name", "ordinalPosition"}))
+          @QueryParam("sortBy")
+          @DefaultValue("name")
+          String sortBy,
+      @Parameter(
+              description = "Sort order. Supported values: 'asc' (default), 'desc'",
+              schema =
+                  @Schema(
+                      type = "string",
+                      allowableValues = {"asc", "desc"}))
+          @QueryParam("sortOrder")
+          @DefaultValue("asc")
+          String sortOrder) {
     OperationContext operationContext =
         new OperationContext(entityType, MetadataOperation.VIEW_BASIC);
-    authorizer.authorize(securityContext, operationContext, getResourceContextById(id));
+    ResourceContext<Table> resourceContext = getResourceContextById(id, include);
+    authorizer.authorize(securityContext, operationContext, resourceContext);
 
     ResultList<org.openmetadata.schema.type.Column> result =
         repository.getTableColumns(
-            id, limitParam, offsetParam, fieldsParam, include, authorizer, securityContext);
+            id,
+            limitParam,
+            offsetParam,
+            fieldsParam,
+            include,
+            sortBy,
+            sortOrder,
+            resourceContext.getOwners(),
+            authorizer,
+            securityContext);
     TableColumnList tableColumnList = new TableColumnList();
     tableColumnList.setData(result.getData());
     tableColumnList.setPaging(result.getPaging());
@@ -1655,15 +1726,44 @@ public class TableResource extends EntityResource<Table, TableRepository> {
               schema = @Schema(implementation = Include.class))
           @QueryParam("include")
           @DefaultValue("non-deleted")
-          Include include) {
+          Include include,
+      @Parameter(
+              description =
+                  "Sort columns by field. Supported values: 'name' (default), 'ordinalPosition'",
+              schema =
+                  @Schema(
+                      type = "string",
+                      allowableValues = {"name", "ordinalPosition"}))
+          @QueryParam("sortBy")
+          @DefaultValue("name")
+          String sortBy,
+      @Parameter(
+              description = "Sort order. Supported values: 'asc' (default), 'desc'",
+              schema =
+                  @Schema(
+                      type = "string",
+                      allowableValues = {"asc", "desc"}))
+          @QueryParam("sortOrder")
+          @DefaultValue("asc")
+          String sortOrder) {
     OperationContext operationContext =
         new OperationContext(entityType, MetadataOperation.VIEW_BASIC);
     // JAX-RS automatically URL-decodes path parameters, so fqn is already decoded
-    authorizer.authorize(securityContext, operationContext, getResourceContextByName(fqn));
+    ResourceContext<Table> resourceContext = getResourceContextByName(fqn, include);
+    authorizer.authorize(securityContext, operationContext, resourceContext);
 
     ResultList<org.openmetadata.schema.type.Column> result =
         repository.getTableColumnsByFQN(
-            fqn, limitParam, offsetParam, fieldsParam, include, authorizer, securityContext);
+            fqn,
+            limitParam,
+            offsetParam,
+            fieldsParam,
+            include,
+            sortBy,
+            sortOrder,
+            resourceContext.getOwners(),
+            authorizer,
+            securityContext);
     TableColumnList tableColumnList = new TableColumnList();
     tableColumnList.setData(result.getData());
     tableColumnList.setPaging(result.getPaging());
@@ -1842,13 +1942,41 @@ public class TableResource extends EntityResource<Table, TableRepository> {
               schema = @Schema(implementation = Include.class))
           @QueryParam("include")
           @DefaultValue("non-deleted")
-          Include include) {
+          Include include,
+      @Parameter(
+              description =
+                  "Sort columns by field. Supported values: 'name' (default), 'ordinalPosition'",
+              schema =
+                  @Schema(
+                      type = "string",
+                      allowableValues = {"name", "ordinalPosition"}))
+          @QueryParam("sortBy")
+          @DefaultValue("name")
+          String sortBy,
+      @Parameter(
+              description = "Sort order. Supported values: 'asc' (default), 'desc'",
+              schema =
+                  @Schema(
+                      type = "string",
+                      allowableValues = {"asc", "desc"}))
+          @QueryParam("sortOrder")
+          @DefaultValue("asc")
+          String sortOrder) {
     OperationContext operationContext =
         new OperationContext(entityType, MetadataOperation.VIEW_BASIC);
     authorizer.authorize(securityContext, operationContext, getResourceContextById(id));
     ResultList<Column> result =
         repository.searchTableColumnsById(
-            id, query, limitParam, offsetParam, fieldsParam, include, authorizer, securityContext);
+            id,
+            query,
+            limitParam,
+            offsetParam,
+            fieldsParam,
+            include,
+            sortBy,
+            sortOrder,
+            authorizer,
+            securityContext);
     TableColumnList tableColumnList = new TableColumnList();
     tableColumnList.setData(result.getData());
     tableColumnList.setPaging(result.getPaging());
@@ -1903,13 +2031,41 @@ public class TableResource extends EntityResource<Table, TableRepository> {
               schema = @Schema(implementation = Include.class))
           @QueryParam("include")
           @DefaultValue("non-deleted")
-          Include include) {
+          Include include,
+      @Parameter(
+              description =
+                  "Sort columns by field. Supported values: 'name' (default), 'ordinalPosition'",
+              schema =
+                  @Schema(
+                      type = "string",
+                      allowableValues = {"name", "ordinalPosition"}))
+          @QueryParam("sortBy")
+          @DefaultValue("name")
+          String sortBy,
+      @Parameter(
+              description = "Sort order. Supported values: 'asc' (default), 'desc'",
+              schema =
+                  @Schema(
+                      type = "string",
+                      allowableValues = {"asc", "desc"}))
+          @QueryParam("sortOrder")
+          @DefaultValue("asc")
+          String sortOrder) {
     OperationContext operationContext =
         new OperationContext(entityType, MetadataOperation.VIEW_BASIC);
     authorizer.authorize(securityContext, operationContext, getResourceContextByName(fqn));
     ResultList<org.openmetadata.schema.type.Column> result =
         repository.searchTableColumnsByFQN(
-            fqn, query, limitParam, offsetParam, fieldsParam, include, authorizer, securityContext);
+            fqn,
+            query,
+            limitParam,
+            offsetParam,
+            fieldsParam,
+            include,
+            sortBy,
+            sortOrder,
+            authorizer,
+            securityContext);
     TableColumnList tableColumnList = new TableColumnList();
     tableColumnList.setData(result.getData());
     tableColumnList.setPaging(result.getPaging());

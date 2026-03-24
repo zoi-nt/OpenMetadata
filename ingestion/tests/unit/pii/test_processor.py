@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -82,7 +83,7 @@ def generate_test_cases(
             continue
 
         sampler_record = SamplerResponse(
-            table=test_case.table,
+            entity=test_case.table,
             sample_data=test_case.sample_data,
         )
 
@@ -113,4 +114,10 @@ def test_it_returns_the_expected_column_tags(
         assert obtained_tags_by_column[expected_column] == expected_tags, (
             f"[Test case: {test_case}] Tags for column {expected_column!r} mismatch: "
             + f"Obtained({obtained_tags_by_column[expected_column]!r}) != Expected({expected_tags!r})"
+        )
+
+    for column_tag in result.column_tags:
+        assert re.match(
+            "^Detected by `[a-zA-Z]+Recognizer` [0-9]+ times? with an average score of",
+            column_tag.tag_label.reason,
         )

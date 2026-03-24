@@ -99,6 +99,10 @@ final class GChatMarkdownFormatter extends AbstractVisitor {
   public void visit(Image image) {
     GChatMarkdownFormatter tmp = new GChatMarkdownFormatter();
     String alt = tmp.renderInlineChildren(image).trim();
+    if (alt.isEmpty()) {
+      String title = image.getTitle();
+      alt = title == null ? "" : title.trim();
+    }
     if (alt.isEmpty()) alt = extractPlainText(image);
     if (alt.isEmpty()) alt = "Image";
     String url = sanitizeUrl(image.getDestination());
@@ -173,8 +177,7 @@ final class GChatMarkdownFormatter extends AbstractVisitor {
 
   private String safeText(String s) {
     if (s == null) return "";
-    if (s.length() <= 4096) return s;
-    return s.substring(0, 4095) + "…";
+    return s;
   }
 
   private static String extractPlainText(Node node) {

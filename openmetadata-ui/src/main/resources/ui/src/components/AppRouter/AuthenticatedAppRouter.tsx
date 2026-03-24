@@ -185,6 +185,12 @@ const ExplorePageV1 = withSuspenseFallback(
   React.lazy(() => import('../../pages/ExplorePage/ExplorePageV1.component'))
 );
 
+const OntologyExplorerPage = withSuspenseFallback(
+  React.lazy(
+    () => import('../../pages/OntologyExplorerPage/OntologyExplorerPage')
+  )
+);
+
 const RequestDescriptionPage = withSuspenseFallback(
   React.lazy(
     () =>
@@ -242,6 +248,10 @@ const IncidentManagerPage = withSuspenseFallback(
   React.lazy(() => import('../../pages/IncidentManager/IncidentManagerPage'))
 );
 
+const TestLibraryPage = withSuspenseFallback(
+  React.lazy(() => import('../../pages/TestLibrary/TestLibraryPage'))
+);
+
 const IncidentManagerDetailPage = withSuspenseFallback(
   React.lazy(
     () =>
@@ -282,6 +292,13 @@ const MetricListPage = withSuspenseFallback(
 const AddMetricPage = withSuspenseFallback(
   React.lazy(
     () => import('../../pages/MetricsPage/AddMetricPage/AddMetricPage')
+  )
+);
+
+const ColumnBulkOperationsPage = withSuspenseFallback(
+  React.lazy(
+    () =>
+      import('../../pages/ColumnBulkOperations/ColumnBulkOperations.component')
   )
 );
 
@@ -330,6 +347,10 @@ const AuthenticatedAppRouter: FunctionComponent = () => {
       <Route
         element={<ExplorePageV1 pageTitle={t('label.explore')} />}
         path={ROUTES.EXPLORE_WITH_TAB}
+      />
+      <Route
+        element={<OntologyExplorerPage />}
+        path={ROUTES.ONTOLOGY_EXPLORER}
       />
       <Route
         element={
@@ -586,6 +607,18 @@ const AuthenticatedAppRouter: FunctionComponent = () => {
         }
         path={ROUTES.INCIDENT_MANAGER}
       />
+      <Route
+        element={
+          <AdminProtectedRoute
+            hasPermission={userPermissions.hasViewPermissions(
+              ResourceEntity.TEST_DEFINITION,
+              permissions
+            )}>
+            <TestLibraryPage />
+          </AdminProtectedRoute>
+        }
+        path={ROUTES.TEST_LIBRARY}
+      />
 
       {[
         ROUTES.TEST_CASE_DETAILS,
@@ -603,6 +636,7 @@ const AuthenticatedAppRouter: FunctionComponent = () => {
               <IncidentManagerDetailPage />
             </AdminProtectedRoute>
           }
+          key={route}
           path={route}
         />
       ))}
@@ -741,6 +775,10 @@ const AuthenticatedAppRouter: FunctionComponent = () => {
           />
         }
         path={ROUTES.ADD_METRIC}
+      />
+      <Route
+        element={<ColumnBulkOperationsPage />}
+        path={ROUTES.COLUMN_BULK_OPERATIONS}
       />
 
       <Route

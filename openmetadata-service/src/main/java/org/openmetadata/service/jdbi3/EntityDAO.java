@@ -113,6 +113,23 @@ public interface EntityDAO<T extends EntityInterface> {
       @Bind("id") String id,
       @Bind("json") String json);
 
+  @Transaction
+  @ConnectionAwareSqlBatch(
+      value =
+          "UPDATE <table> SET json = :json, <nameHashColumn> = :nameHashColumnValue WHERE id = :id",
+      connectionType = MYSQL)
+  @ConnectionAwareSqlBatch(
+      value =
+          "UPDATE <table> SET json = (:json :: jsonb), <nameHashColumn> = :nameHashColumnValue WHERE id = :id",
+      connectionType = POSTGRES)
+  @BatchChunkSize(100)
+  void updateMany(
+      @Define("table") String table,
+      @Define("nameHashColumn") String nameHashColumn,
+      @BindFQN("nameHashColumnValue") List<String> nameHashColumnValue,
+      @BindUUID("id") List<UUID> ids,
+      @Bind("json") List<String> json);
+
   /**
    * Update entity with optimistic locking using version check.
    * Returns the number of rows updated (0 if version mismatch, 1 if successful)
@@ -446,6 +463,18 @@ public interface EntityDAO<T extends EntityInterface> {
         entities.stream().map(JsonUtils::pojoToJson).toList());
   }
 
+  /** Batch update entities. Don't override */
+  default void updateMany(List<EntityInterface> entities) {
+    List<String> fqns = entities.stream().map(EntityInterface::getFullyQualifiedName).toList();
+    List<UUID> ids = entities.stream().map(EntityInterface::getId).toList();
+    updateMany(
+        getTableName(),
+        getNameHashColumn(),
+        fqns,
+        ids,
+        entities.stream().map(JsonUtils::pojoToJson).toList());
+  }
+
   default void insert(String nameHash, EntityInterface entity, String fqn) {
     insert(getTableName(), nameHash, fqn, JsonUtils.pojoToJson(entity));
   }
@@ -566,7 +595,14 @@ public interface EntityDAO<T extends EntityInterface> {
 
   default T jsonToEntity(String json, Object identity) {
     Class<T> clz = getEntityClass();
-    T entity = json != null ? JsonUtils.readValue(json, clz) : null;
+    T entity;
+    if (json != null) {
+      org.openmetadata.service.monitoring.RequestLatencyContext.trackJsonDeserialize(json.length());
+    }
+    try (var ignored =
+        org.openmetadata.service.monitoring.RequestLatencyContext.phase("jsonDeserialize")) {
+      entity = json != null ? JsonUtils.readValue(json, clz) : null;
+    }
     if (entity == null) {
       String entityType = Entity.getEntityTypeFromClass(clz);
       throw EntityNotFoundException.byMessage(

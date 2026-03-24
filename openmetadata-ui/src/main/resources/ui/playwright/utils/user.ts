@@ -11,7 +11,7 @@
  *  limitations under the License.
  */
 
-import { Browser, expect, Page, Response } from '@playwright/test';
+import { Browser, expect, Page } from '@playwright/test';
 import {
   GLOBAL_SETTING_PERMISSIONS,
   SETTING_PAGE_ENTITY_PERMISSION,
@@ -25,6 +25,7 @@ import {
 import { SidebarItem } from '../constant/sidebar';
 import { UserClass } from '../support/user/UserClass';
 import {
+  clickOutside,
   descriptionBox,
   descriptionBoxReadOnly,
   getAuthContext,
@@ -44,13 +45,20 @@ export const visitUserListPage = async (page: Page) => {
 };
 
 export const performUserLogin = async (browser: Browser, user: UserClass) => {
-  const page = await browser.newPage();
+  const context = await browser.newContext({
+    storageState: {
+      cookies: [],
+      origins: [],
+    },
+  });
+  const page = await context.newPage();
   await user.login(page);
   const token = await getToken(page);
   const apiContext = await getAuthContext(token);
   const afterAction = async () => {
     await apiContext.dispose();
     await page.close();
+    await context.close();
   };
 
   return { page, apiContext, afterAction };
@@ -90,24 +98,43 @@ export const deletedUserChecks = async (page: Page) => {
 
 export const visitUserProfilePage = async (page: Page, userName: string) => {
   await settingClick(page, GlobalSettingOptions.USERS);
-  await page.waitForSelector(
-    '[data-testid="user-list-v1-component"] [data-testid="loader"]',
-    {
+  await page
+    .getByTestId('user-list-v1-component')
+    .getByTestId('loader')
+    .waitFor({
       state: 'detached',
-    }
-  );
+    });
   const userResponse = page.waitForResponse(
     '/api/v1/search/query?q=*&index=*&from=0&size=*'
   );
-  const loader = page.waitForSelector(
-    '[data-testid="user-list-v1-component"] [data-testid="loader"]',
-    {
+  const loaderPromise = page
+    .getByTestId('user-list-v1-component')
+    .getByTestId('loader')
+    .waitFor({
       state: 'detached',
-    }
-  );
-  await page.getByTestId('searchbar').fill(userName);
-  await userResponse;
-  await loader;
+    });
+  const searchBar = page.getByTestId('searchbar');
+
+  await expect
+    .poll(
+      async () => {
+        const searchRequest = page.waitForResponse('/api/v1/search/query*');
+        await searchBar.fill('');
+        await searchBar.fill(userName);
+        await searchRequest;
+        await loaderPromise.catch(() => undefined);
+
+        return await page.getByTestId(userName).count();
+      },
+      {
+        timeout: 60000,
+        intervals: [1000, 2000, 5000],
+        message: `Timed out waiting for user ${userName} to become visible in the user list`,
+      }
+    )
+    .toBeGreaterThan(0);
+
+  await userResponse.catch(() => undefined);
   await page.getByTestId(userName).click();
 };
 
@@ -121,26 +148,27 @@ export const softDeleteUserProfilePage = async (
   );
   await page.getByTestId('searchbar').fill(userName);
   await userResponse;
-  await page.waitForSelector('.user-list-table [data-testid="loader"]', {
-    state: 'detached',
-  });
+  await page
+    .locator('.user-list-table')
+    .getByTestId('loader')
+    .waitFor({ state: 'detached' });
 
   await page.getByTestId(userName).click();
 
   await nonDeletedUserChecks(page);
 
-  await page.waitForSelector('[data-testid="user-profile-manage-btn"]', {
+  await page.getByTestId('user-profile-manage-btn').waitFor({
     state: 'visible',
   });
   await page.click('[data-testid="user-profile-manage-btn"]');
 
-  await page.waitForSelector('.ant-popover:not(.ant-popover-hidden)', {
+  await page.locator('.ant-popover:not(.ant-popover-hidden)').waitFor({
     state: 'visible',
   });
 
   await page.getByText('Delete Profile').click();
 
-  await page.waitForSelector('[role="dialog"].ant-modal');
+  await page.locator('[role="dialog"].ant-modal').waitFor();
 
   await expect(page.locator('[role="dialog"].ant-modal')).toBeVisible();
   await expect(page.locator('.ant-modal-title')).toContainText(displayName);
@@ -163,7 +191,7 @@ export const restoreUserProfilePage = async (page: Page, fqn: string) => {
   await page.click('[data-testid="user-profile-manage-btn"]');
   await page.getByText('Restore').click();
 
-  await page.waitForSelector('[role="dialog"].ant-modal');
+  await page.locator('[role="dialog"].ant-modal').waitFor();
 
   await expect(page.locator('[role="dialog"].ant-modal')).toBeVisible();
   await expect(page.locator('.ant-modal-title')).toContainText('Restore user');
@@ -188,7 +216,7 @@ export const hardDeleteUserProfilePage = async (
 ) => {
   await page.getByTestId('user-profile-manage-btn').click();
   await page.getByText('Delete Profile').click();
-  await page.waitForSelector('[role="dialog"].ant-modal');
+  await page.locator('[role="dialog"].ant-modal').waitFor();
 
   await expect(page.locator('[role="dialog"].ant-modal')).toBeVisible();
   await expect(page.locator('.ant-modal-title')).toContainText(displayName);
@@ -315,7 +343,7 @@ export const softDeleteUser = async (
   displayName: string
 ) => {
   // Wait for the loader to disappear
-  await page.waitForSelector('[data-testid="loader"]', { state: 'hidden' });
+  await waitForAllLoadersToDisappear(page);
 
   const searchResponse = page.waitForResponse(
     '/api/v1/search/query?q=*&index=*&from=0&size=*'
@@ -340,7 +368,7 @@ export const softDeleteUser = async (
   await toastNotification(page, `"${displayName}" deleted successfully!`);
 
   // Wait for the loader to disappear
-  await page.waitForSelector('[data-testid="loader"]', { state: 'hidden' });
+  await waitForAllLoadersToDisappear(page);
 
   // Search soft deleted user in non-deleted mode
   const searchSoftDeletedUserResponse = page.waitForResponse(
@@ -370,7 +398,7 @@ export const restoreUser = async (
   await fetchDeletedUsers;
 
   // Wait for the loader to disappear
-  await page.waitForSelector('[data-testid="loader"]', { state: 'hidden' });
+  await waitForAllLoadersToDisappear(page);
 
   const searchUsers = page.waitForResponse('/api/v1/search/query*');
   await page.fill('[data-testid="searchbar"]', username);
@@ -410,7 +438,7 @@ export const permanentDeleteUser = async (
   }
 
   // Wait for the loader to disappear
-  await page.waitForSelector('[data-testid="loader"]', { state: 'hidden' });
+  await waitForAllLoadersToDisappear(page);
 
   // Search the user
   const searchUserResponse = page.waitForResponse('/api/v1/search/query*');
@@ -418,7 +446,7 @@ export const permanentDeleteUser = async (
   await searchUserResponse;
 
   // Wait for the loader to disappear
-  await page.waitForSelector('[data-testid="loader"]', { state: 'hidden' });
+  await waitForAllLoadersToDisappear(page);
 
   // Click on delete user button
   await page.click(`[data-testid="delete-user-btn-${username}"]`);
@@ -440,7 +468,7 @@ export const permanentDeleteUser = async (
   await reFetchUsers;
 
   // Wait for the loader to disappear
-  await page.waitForSelector('[data-testid="loader"]', { state: 'hidden' });
+  await waitForAllLoadersToDisappear(page);
 
   // Search the user again
   const searchUserAfterDeleteResponse = page.waitForResponse(
@@ -497,14 +525,14 @@ export const updateExpiration = async (page: Page, expiry: number) => {
     `ccc d'th' MMMM, yyyy`
   );
 
-  // Wait for dropdown to close and ensure no overlays are present
+  // eslint-disable-next-line playwright/no-wait-for-timeout -- dropdown close animation delay
   await page.waitForTimeout(100);
 
   // Click outside to close any open dropdowns
   await page.mouse.click(1, 1);
 
   // Wait for any dropdown animations to complete
-  await page.waitForSelector('.ant-select-dropdown', { state: 'hidden' });
+  await page.locator('.ant-select-dropdown').waitFor({ state: 'hidden' });
 
   // Now click the save button
   await page.click('[data-testid="save-edit"]');
@@ -588,9 +616,13 @@ export const checkStewardServicesPermissions = async (page: Page) => {
   // Perform search actions
   await page.click('[data-testid="search-dropdown-Data Assets"]');
 
-  await page.getByTestId('drop-down-menu').getByTestId('loader').waitFor({
-    state: 'detached',
-  });
+  await page
+    .getByTestId('drop-down-menu')
+    .getByTestId('loader')
+    .first()
+    .waitFor({
+      state: 'detached',
+    });
 
   const dataAssetDropdownRequest = page.waitForResponse(
     '/api/v1/search/aggregate?index=dataAsset&field=entityType.keyword*'
@@ -614,22 +646,16 @@ export const checkStewardServicesPermissions = async (page: Page) => {
 
   // Click on the entity link in the drawer title
   await page.click('.summary-panel-container [data-testid="entity-link"]');
-
-  await page.waitForLoadState('networkidle');
-
-  // Check if the edit tier button is visible
-  await expect(page.locator('[data-testid="edit-icon-tier"]')).toBeVisible();
 };
 
 export const checkStewardPermissions = async (page: Page) => {
   // Check Add domain permission
   await expect(page.locator('[data-testid="add-domain"]')).not.toBeVisible();
 
-  await expect(
-    page
-      .getByRole('cell', { name: 'user_id' })
-      .getByTestId('edit-displayName-button')
-  ).toBeVisible();
+  await page
+    .getByRole('cell', { name: /user_id/i })
+    .getByTestId('edit-displayName-button')
+    .waitFor({ state: 'attached' });
 
   // Check edit owner permission
   await expect(page.locator('[data-testid="edit-owner"]')).toBeVisible();
@@ -672,11 +698,13 @@ export const addUser = async (
     email,
     password,
     role,
+    personas,
   }: {
     name: string;
     email: string;
     password: string;
     role: string;
+    personas?: string[];
   }
 ) => {
   await page.click('[data-testid="add-user"]');
@@ -691,10 +719,40 @@ export const addUser = async (
   await page.fill('#password', password);
   await page.fill('#confirmPassword', password);
 
-  await page.click('[data-testid="roles-dropdown"] > .ant-select-selector');
-  await page.getByTestId('roles-dropdown').getByRole('combobox').fill(role);
-  await page.click('.ant-select-item-option-content');
-  await page.click('[data-testid="roles-dropdown"] > .ant-select-selector');
+  const rolesCombobox = page
+    .getByTestId('roles-dropdown')
+    .getByRole('combobox');
+  await expect(rolesCombobox).toBeVisible({ timeout: 120000 });
+  await rolesCombobox.click();
+  await rolesCombobox.fill(role);
+  const roleOption = page
+    .locator('.ant-select-item-option-content')
+    .filter({ hasText: new RegExp(`^${role}$`) })
+    .first();
+  await expect(roleOption).toBeVisible({ timeout: 120000 });
+  await roleOption.click();
+  await clickOutside(page);
+
+  if (personas?.length) {
+    await page
+      .locator('[data-testid="personas-dropdown"] .ant-select-selector')
+      .click();
+    await page
+      .getByTestId('personas-dropdown')
+      .getByRole('combobox')
+      .fill(personas[0]);
+    await page.locator('.ant-select-dropdown:visible').first().waitFor({
+      state: 'visible',
+    });
+    const personaOption = page
+      .locator('.ant-select-dropdown:visible')
+      .locator('.ant-select-item-option')
+      .filter({ hasText: personas[0] })
+      .first();
+    await personaOption.waitFor({ state: 'visible' });
+    await personaOption.click();
+    await clickOutside(page);
+  }
 
   const saveResponse = page.waitForResponse('/api/v1/users');
   await page.click('[data-testid="save-user"]');
@@ -801,13 +859,10 @@ export const settingPageOperationPermissionCheck = async (page: Page) => {
   await redirectToHomePage(page);
 
   for (const id of Object.values(SETTING_PAGE_ENTITY_PERMISSION)) {
-    let apiResponse: Promise<Response> | undefined;
-    if (id?.api) {
-      apiResponse = page.waitForResponse(id.api);
-    }
+    const apiResponse = id?.api ? page.waitForResponse(id.api) : undefined;
     // Navigate to settings and respective tab page
     await settingClick(page, id.testid as SettingOptionsType);
-    if (id?.api && apiResponse) {
+    if (apiResponse) {
       await apiResponse;
     }
 

@@ -1,5 +1,5 @@
 /*
- *  Copyright 2025 Collate.
+ *  Copyright 2026 Collate.
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
  *  You may obtain a copy of the License at
@@ -150,6 +150,7 @@ export enum MetricType {
     NotLikeCount = "notLikeCount",
     NotRegexCount = "notRegexCount",
     NullCount = "nullCount",
+    NullMissingCount = "nullMissingCount",
     NullProportion = "nullProportion",
     RegexCount = "regexCount",
     RowCount = "rowCount",
@@ -159,5 +160,6 @@ export enum MetricType {
     ThirdQuartile = "thirdQuartile",
     UniqueCount = "uniqueCount",
     UniqueProportion = "uniqueProportion",
+    ValueRank = "valueRank",
     ValuesCount = "valuesCount",
 }

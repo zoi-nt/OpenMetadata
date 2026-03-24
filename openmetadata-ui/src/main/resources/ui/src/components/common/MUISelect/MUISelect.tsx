@@ -21,7 +21,8 @@ import {
   Typography,
   useTheme,
 } from '@mui/material';
-import { FC, memo, ReactNode } from 'react';
+import { isEmpty } from 'lodash';
+import { FC, memo, ReactNode, useMemo } from 'react';
 
 interface SelectOption {
   label: string;
@@ -41,7 +42,7 @@ const MUISelect: FC<MUISelectProps> = ({
   options = [],
   placeholder,
   required,
-  value,
+  value = '',
   onChange,
   error,
   size = 'small',
@@ -50,6 +51,11 @@ const MUISelect: FC<MUISelectProps> = ({
 }) => {
   const labelId = id ? `${id}-label` : 'mui-select-label';
   const theme = useTheme();
+
+  const optionsMap = useMemo(
+    () => new Map(options.map((opt) => [opt.value, opt.label])),
+    [options]
+  );
 
   return (
     <FormControl fullWidth error={error} required={required} size={size}>
@@ -63,6 +69,11 @@ const MUISelect: FC<MUISelectProps> = ({
           disablePortal: false,
           // Additional props to ensure visibility
           PaperProps: {
+            // data-react-aria-top-layer prevents react-aria from treating
+            // this MUI portal as an "outside click" target, which would
+            // otherwise close any open react-aria overlay (e.g. Dialog,
+            // Popover) the moment the user clicks inside this dropdown.
+            'data-react-aria-top-layer': true,
             style: {
               maxHeight: 300, // Limit dropdown height
             },
@@ -71,17 +82,19 @@ const MUISelect: FC<MUISelectProps> = ({
         label={label}
         labelId={labelId}
         renderValue={(selected) => {
-          if (!selected) {
-            return (
-              <Typography sx={{ color: theme.palette.grey[500] }}>
+          if (isEmpty(selected)) {
+            return placeholder ? (
+              <Typography color={theme.palette.grey[400]}>
                 {placeholder}
               </Typography>
-            );
+            ) : null;
           }
 
-          return selected as string | number | '';
+          const selectedValue = selected as string | number;
+
+          return optionsMap.get(selectedValue) ?? selectedValue;
         }}
-        value={value || ''}
+        value={value}
         onChange={onChange}
         {...props}>
         {options.map((option) => (

@@ -17,6 +17,7 @@ from time import sleep
 from typing import List, Tuple
 
 import pytest
+from sqlalchemy import text
 
 from metadata.data_quality.api.models import TestCaseDefinition
 from metadata.generated.schema.entity.data.table import DmlOperationType, SystemProfile
@@ -30,6 +31,8 @@ from .common.test_cli_db import CliCommonDB
 from .common_e2e_sqa_mixins import SQACommonMethods
 
 
+# TODO: Paused due to credential issue - re-enable once credentials are restored
+@pytest.mark.skip(reason="TODO: Paused due to credential issue")
 class SnowflakeCliTest(CliCommonDB.TestSuite, SQACommonMethods):
     """
     Snowflake CLI Tests
@@ -50,6 +53,8 @@ class SnowflakeCliTest(CliCommonDB.TestSuite, SQACommonMethods):
         "CREATE OR REPLACE TABLE e2e_test.e2e_table(varchar_column VARCHAR(255),int_column INT);",
         "CREATE OR REPLACE TABLE public.public_table(varchar_column VARCHAR(255),int_column INT);",
         "CREATE OR REPLACE TABLE public.e2e_table(varchar_column VARCHAR(255),int_column INT);",
+        "CREATE OR REPLACE TRANSIENT TABLE e2e_test.transient_test_table(id INT, name VARCHAR(100));",
+        "CREATE OR REPLACE TRANSIENT TABLE e2e_test.transient_sample_table(id INT, value VARCHAR(255));",
     ]
 
     create_table_query: str = """
@@ -75,6 +80,8 @@ class SnowflakeCliTest(CliCommonDB.TestSuite, SQACommonMethods):
         "INSERT INTO public_table (varchar_column, int_column) VALUES ('public_table', 1);",
         "MERGE INTO public_table USING (SELECT 'public_table' as varchar_column, 2 as int_column) as source ON public_table.varchar_column = source.varchar_column WHEN MATCHED THEN UPDATE SET public_table.int_column = source.int_column WHEN NOT MATCHED THEN INSERT (varchar_column, int_column) VALUES (source.varchar_column, source.int_column);",
         "DELETE FROM public_table WHERE varchar_column = 'public.public_table';",
+        "INSERT INTO e2e_test.transient_test_table (id, name) VALUES (1, 'Test Data');",
+        "INSERT INTO e2e_test.transient_sample_table (id, value) VALUES (1, 'Sample Value');",
     ]
 
     drop_table_query: str = """
@@ -89,19 +96,21 @@ class SnowflakeCliTest(CliCommonDB.TestSuite, SQACommonMethods):
         "DROP TABLE IF EXISTS E2E_DB.e2e_test.e2e_table;",
         "DROP TABLE IF EXISTS E2E_DB.public.e2e_table;",
         "DROP TABLE IF EXISTS E2E_DB.public.public_table;",
+        "DROP TABLE IF EXISTS E2E_DB.e2e_test.transient_test_table;",
+        "DROP TABLE IF EXISTS E2E_DB.e2e_test.transient_sample_table;",
     ]
 
     @classmethod
     def tearDownClass(cls):
         super().tearDownClass()
-        with cls.engine.connect() as connection:
+        with cls.engine.begin() as connection:
             for stmt in cls.teardown_sql_statements:
-                connection.execute(stmt)
+                connection.execute(text(stmt))
 
     def setUp(self) -> None:
-        with self.engine.connect() as connection:
+        with self.engine.begin() as connection:
             for sql_statements in self.prepare_snowflake_e2e:
-                connection.execute(sql_statements)
+                connection.execute(text(sql_statements))
 
     @staticmethod
     def get_connector_name() -> str:
@@ -125,24 +134,38 @@ class SnowflakeCliTest(CliCommonDB.TestSuite, SQACommonMethods):
         )
 
     def create_table_and_view(self) -> None:
-        with self.engine.connect() as connection:
-            connection.execute(self.create_table_query)
+        with self.engine.begin() as connection:
+            connection.execute(text(self.create_table_query))
             for insert_query in self.insert_data_queries:
-                connection.execute(insert_query)
-            connection.execute(self.create_view_query)
-            connection.close()
+                connection.execute(text(insert_query))
+            connection.execute(text(self.create_view_query))
 
     def delete_table_and_view(self) -> None:
-        with self.engine.connect() as connection:
-            connection.execute(self.drop_view_query)
-            connection.execute(self.drop_table_query)
-            connection.close()
+        with self.engine.begin() as connection:
+            connection.execute(text(self.drop_view_query))
+            connection.execute(text(self.drop_table_query))
 
     def delete_table_rows(self) -> None:
         SQACommonMethods.run_delete_queries(self)
 
     def update_table_row(self) -> None:
         SQACommonMethods.run_update_queries(self)
+
+    def build_config_file_with_transient_tables(self, include_transient: bool) -> None:
+        """Build config file with includeTransientTables parameter set"""
+        import yaml
+
+        self.build_config_file(E2EType.INGEST)
+
+        with open(self.test_file_path, "r", encoding="utf-8") as file:
+            config = yaml.safe_load(file)
+
+        config["source"]["serviceConnection"]["config"][
+            "includeTransientTables"
+        ] = include_transient
+
+        with open(self.test_file_path, "w", encoding="utf-8") as file:
+            yaml.dump(config, file, default_flow_style=False)
 
     @pytest.mark.order(2)
     def test_create_table_with_profiler(self) -> None:
@@ -186,6 +209,14 @@ class SnowflakeCliTest(CliCommonDB.TestSuite, SQACommonMethods):
     @staticmethod
     def fqn_created_table() -> str:
         return "e2e_snowflake.E2E_DB.E2E_TEST.PERSONS"
+
+    @staticmethod
+    def fqn_transient_test_table() -> str:
+        return "e2e_snowflake.E2E_DB.E2E_TEST.TRANSIENT_TEST_TABLE"
+
+    @staticmethod
+    def fqn_transient_sample_table() -> str:
+        return "e2e_snowflake.E2E_DB.E2E_TEST.TRANSIENT_SAMPLE_TABLE"
 
     @staticmethod
     def get_includes_schemas() -> List[str]:
@@ -292,17 +323,21 @@ class SnowflakeCliTest(CliCommonDB.TestSuite, SQACommonMethods):
     @classmethod
     def wait_for_query_log(cls, timeout=600):
         start = datetime.now().timestamp()
-        cls.engine.execute("SELECT 'e2e_query_log_wait'")
+        with cls.engine.connect() as conn:
+            conn.execute(text("SELECT 'e2e_query_log_wait'"))
         latest = 0
         while latest < start:
             sleep(5)
-            latest = (
-                cls.engine.execute(
-                    'SELECT max(start_time) FROM "SNOWFLAKE"."ACCOUNT_USAGE"."QUERY_HISTORY"'
+            with cls.engine.connect() as conn:
+                latest = (
+                    conn.execute(
+                        text(
+                            'SELECT max(start_time) FROM "SNOWFLAKE"."ACCOUNT_USAGE"."QUERY_HISTORY"'
+                        )
+                    )
+                    .scalar()
+                    .timestamp()
                 )
-                .scalar()
-                .timestamp()
-            )
             if (datetime.now().timestamp() - start) > timeout:
                 raise TimeoutError(f"Query log not updated for {timeout} seconds")
 
@@ -330,3 +365,72 @@ class SnowflakeCliTest(CliCommonDB.TestSuite, SQACommonMethods):
 
     def get_expected_test_case_results(self):
         return [TestCaseResult(testCaseStatus=TestCaseStatus.Success, timestamp=0)]
+
+    @pytest.mark.order(14)
+    def test_transient_tables_included(self) -> None:
+        """Test that transient tables ARE ingested when includeTransientTables=true"""
+        self.build_config_file_with_transient_tables(include_transient=True)
+
+        result = self.run_command()
+        sink_status, source_status = self.retrieve_statuses(result)
+
+        self.assertEqual(len(source_status.failures), 0)
+        self.assertEqual(len(sink_status.failures), 0)
+
+        transient_test_table = self.retrieve_table(self.fqn_transient_test_table())
+        transient_sample_table = self.retrieve_table(self.fqn_transient_sample_table())
+
+        self.assertIsNotNone(
+            transient_test_table,
+            "Transient test table should be ingested when includeTransientTables=true",
+        )
+        self.assertIsNotNone(
+            transient_sample_table,
+            "Transient sample table should be ingested when includeTransientTables=true",
+        )
+
+        self.assertEqual(
+            str(transient_test_table.tableType.value),
+            "Transient",
+            "Table type should be Transient",
+        )
+        self.assertEqual(
+            str(transient_sample_table.tableType.value),
+            "Transient",
+            "Table type should be Transient",
+        )
+
+        regular_table = self.retrieve_table("e2e_snowflake.E2E_DB.E2E_TEST.REGIONS")
+        self.assertIsNotNone(
+            regular_table,
+            "Regular tables should still be ingested when includeTransientTables=false",
+        )
+
+    @pytest.mark.order(15)
+    def test_transient_tables_excluded(self) -> None:
+        """Test that transient tables are NOT ingested when includeTransientTables=false"""
+        self.build_config_file_with_transient_tables(include_transient=False)
+
+        result = self.run_command()
+        sink_status, source_status = self.retrieve_statuses(result)
+
+        self.assertEqual(len(source_status.failures), 0)
+        self.assertEqual(len(sink_status.failures), 0)
+
+        transient_test_table = self.retrieve_table(self.fqn_transient_test_table())
+        transient_sample_table = self.retrieve_table(self.fqn_transient_sample_table())
+
+        self.assertIsNone(
+            transient_test_table,
+            "Transient test table should NOT be ingested when includeTransientTables=false",
+        )
+        self.assertIsNone(
+            transient_sample_table,
+            "Transient sample table should NOT be ingested when includeTransientTables=false",
+        )
+
+        regular_table = self.retrieve_table("e2e_snowflake.E2E_DB.E2E_TEST.REGIONS")
+        self.assertIsNotNone(
+            regular_table,
+            "Regular tables should still be ingested when includeTransientTables=false",
+        )

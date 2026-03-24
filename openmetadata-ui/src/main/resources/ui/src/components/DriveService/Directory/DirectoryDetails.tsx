@@ -95,12 +95,17 @@ function DirectoryDetails({
 }: Readonly<DirectoryDetailsProps>) {
   const { t } = useTranslation();
   const { currentUser } = useApplicationStore();
-  const { tab: activeTab = EntityTabs.CHILDREN } =
-    useRequiredParams<{ tab: EntityTabs }>();
-  const { fqn: decodedDirectoryFQN } = useFqn();
+  const { tab: activeTab = EntityTabs.CHILDREN } = useRequiredParams<{
+    tab: EntityTabs;
+  }>();
+
   const navigate = useNavigate();
   const { customizedPage, isLoading } = useCustomPages(PageType.Directory);
   const [isTabExpanded, setIsTabExpanded] = useState(false);
+
+  const { entityFqn: decodedDirectoryFQN } = useFqn({
+    type: EntityType.DIRECTORY,
+  });
 
   const [feedCount, setFeedCount] = useState<FeedCounts>(
     FEED_COUNT_INITIAL_DATA
@@ -418,10 +423,7 @@ function DirectoryDetails({
   }
 
   return (
-    <PageLayoutV1
-      pageTitle={t('label.entity-detail-plural', {
-        entity: t('label.directory'),
-      })}>
+    <PageLayoutV1 pageTitle={entityName}>
       <Row gutter={[0, 12]}>
         <Col span={24}>
           <DataAssetsHeader

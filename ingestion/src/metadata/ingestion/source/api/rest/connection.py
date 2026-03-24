@@ -12,13 +12,22 @@
 """
 Source connection handler
 """
-from typing import Optional
+from typing import Dict, Optional, Union
 
 import requests
 from requests.models import Response
 
 from metadata.generated.schema.entity.automations.workflow import (
     Workflow as AutomationWorkflow,
+)
+from metadata.generated.schema.entity.services.connections.api.openAPISchemaFilePath import (
+    OpenAPISchemaFilePath,
+)
+from metadata.generated.schema.entity.services.connections.api.openAPISchemaS3 import (
+    OpenAPISchemaS3,
+)
+from metadata.generated.schema.entity.services.connections.api.openAPISchemaURL import (
+    OpenAPISchemaURL,
 )
 from metadata.generated.schema.entity.services.connections.api.restConnection import (
     RestConnection,
@@ -31,6 +40,8 @@ from metadata.ingestion.ometa.ometa_api import OpenMetadata
 from metadata.ingestion.source.api.rest.parser import (
     OpenAPIParseError,
     parse_openapi_schema,
+    parse_openapi_schema_from_file,
+    parse_openapi_schema_from_s3,
     validate_openapi_schema,
 )
 from metadata.utils.constants import THREE_MIN
@@ -48,19 +59,34 @@ class InvalidOpenAPISchemaError(Exception):
     """
 
 
-def get_connection(connection: RestConnection) -> Response:
+def get_connection(connection: RestConnection) -> Union[Response, Dict]:
     """
-    Create connection
+    Create connection.
+    If openAPISchemaURL is provided, fetches the schema via HTTP.
+    Otherwise, reads from the local openAPISchemaFilePath.
     """
-    if connection.token:
-        headers = {"Authorization": f"Bearer {connection.token.get_secret_value()}"}
-        return requests.get(connection.openAPISchemaURL, headers=headers)
-    return requests.get(connection.openAPISchemaURL)
+    schema_conn = connection.openAPISchemaConnection
+    if isinstance(schema_conn, OpenAPISchemaURL):
+        if connection.token:
+            headers = {"Authorization": f"Bearer {connection.token.get_secret_value()}"}
+            return requests.get(schema_conn.openAPISchemaURL, headers=headers)
+        return requests.get(schema_conn.openAPISchemaURL)
+
+    if isinstance(schema_conn, OpenAPISchemaFilePath):
+        return parse_openapi_schema_from_file(schema_conn.openAPISchemaFilePath)
+
+    if isinstance(schema_conn, OpenAPISchemaS3):
+        return parse_openapi_schema_from_s3(
+            s3_url=str(schema_conn.openAPISchemaS3URL),
+            aws_credentials=schema_conn.awsCredentials,
+        )
+
+    raise ValueError(f"Unsupported openAPISchemaConnection type: {type(schema_conn)}")
 
 
 def test_connection(
     metadata: OpenMetadata,
-    client: Response,
+    client: Union[Response, Dict],
     service_connection: RestConnection,
     automation_workflow: Optional[AutomationWorkflow] = None,
     timeout_seconds: Optional[int] = THREE_MIN,
@@ -69,18 +95,22 @@ def test_connection(
     Test connection. This can be executed either as part
     of a metadata workflow or during an Automation Workflow
     """
+    is_local_file = isinstance(client, dict)
 
     def custom_url_exec():
+        if is_local_file:
+            return []
         if client.status_code == 200:
             return []
         raise SchemaURLError(
-            "Failed to connect to the JSON schema url. Please check the url and credentials. Status Code was: "
-            + str(client.status_code)
+            "Failed to connect to the JSON schema url. "
+            "Please check the url and credentials. "
+            f"Status Code was: {client.status_code}"
         )
 
     def custom_schema_exec():
         try:
-            schema = parse_openapi_schema(client)
+            schema = client if is_local_file else parse_openapi_schema(client)
             if validate_openapi_schema(schema):
                 return []
 
@@ -89,6 +119,8 @@ def test_connection(
             )
         except OpenAPIParseError as e:
             raise InvalidOpenAPISchemaError(f"Failed to parse OpenAPI schema: {e}")
+        except InvalidOpenAPISchemaError:
+            raise
         except Exception as e:
             raise InvalidOpenAPISchemaError(f"Error validating OpenAPI schema: {e}")
 

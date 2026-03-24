@@ -31,6 +31,7 @@ import { PAGE_SIZE_LARGE } from '../../../../constants/constants';
 import { EntityType } from '../../../../enums/entity.enum';
 import { EntityReference } from '../../../../generated/entity/type';
 import { getAllPersonas } from '../../../../rest/PersonaAPI';
+import { normalizeToArray } from '../../../../utils/CommonUtils';
 import {
   getEntityName,
   getEntityReferenceListFromEntities,
@@ -62,6 +63,7 @@ export const PersonaSelectableList = ({
   popoverProps,
   personaList,
   isDefaultPersona,
+  multiSelect,
 }: PersonaSelectableListProps) => {
   const [popupVisible, setPopupVisible] = useState(false);
   const { t } = useTranslation();
@@ -77,6 +79,10 @@ export const PersonaSelectableList = ({
     isDefaultPersona ? 116 : 156
   );
   const dropdownRef = useRef<RefSelectProps | null>(null);
+
+  useEffect(() => {
+    setIsDropdownOpen(popupVisible);
+  }, [popupVisible]);
 
   useEffect(() => {
     const observer = new MutationObserver(() => {
@@ -101,7 +107,7 @@ export const PersonaSelectableList = ({
     }
 
     return () => observer.disconnect();
-  }, [isDropdownOpen]);
+  }, [isDropdownOpen, isDefaultPersona]);
 
   const fetchOptions = async (searchText: string, after?: string) => {
     if (searchText) {
@@ -150,27 +156,36 @@ export const PersonaSelectableList = ({
     loadOptions();
   }, [personaList]);
 
+  useEffect(() => {
+    if (popupVisible) {
+      loadOptions();
+    }
+  }, [popupVisible]);
+
   const handlePersonaUpdate = () => {
     setIsSaving(true);
 
-    Promise.resolve(
-      onUpdate(
-        isDefaultPersona
-          ? currentlySelectedPersonas[0]
-          : currentlySelectedPersonas
-      )
-    ).finally(() => {
-      setIsSaving(false);
-      setPopupVisible(false);
-    });
+    if (multiSelect === false) {
+      Promise.resolve(onUpdate(currentlySelectedPersonas[0])).finally(() => {
+        setIsSaving(false);
+        setPopupVisible(false);
+      });
+    } else {
+      Promise.resolve(onUpdate(currentlySelectedPersonas)).finally(() => {
+        setIsSaving(false);
+        setPopupVisible(false);
+      });
+    }
   };
 
   const handleChange = useCallback(
-    (selectedPersonas: string[]) => {
+    (selectedPersonas: string | string[]) => {
+      const selectedArr = normalizeToArray(selectedPersonas);
+
       const selectedPersonasList = selectOptions.filter(
         (persona) =>
           persona.fullyQualifiedName &&
-          selectedPersonas?.includes(persona.fullyQualifiedName)
+          selectedArr.includes(persona.fullyQualifiedName)
       );
       setCurrentlySelectedPersonas(selectedPersonasList);
     },
@@ -218,7 +233,7 @@ export const PersonaSelectableList = ({
                 (persona) => persona.fullyQualifiedName as string
               )}
               dropdownStyle={{
-                maxHeight: '200px',
+                maxHeight: 'fit-content',
                 overflow: 'auto',
               }}
               maxTagCount={3}
@@ -227,7 +242,8 @@ export const PersonaSelectableList = ({
                   {t('label.plus-count-more', { count: omittedValues.length })}
                 </span>
               )}
-              mode={!isDefaultPersona ? 'multiple' : undefined}
+              mode={isDefaultPersona ? undefined : 'multiple'}
+              open={isDropdownOpen}
               options={selectOptions?.map((persona) => ({
                 label: getEntityName(persona),
                 value: persona.fullyQualifiedName,
@@ -237,6 +253,7 @@ export const PersonaSelectableList = ({
               ref={dropdownRef}
               style={{ width: '100%' }}
               tagRender={TagRenderer}
+              virtual={false}
               onChange={handleChange}
               onDropdownVisibleChange={(open) => {
                 setIsDropdownOpen(open);

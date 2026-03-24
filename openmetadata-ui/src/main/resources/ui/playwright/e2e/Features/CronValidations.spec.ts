@@ -12,6 +12,7 @@
  */
 
 import { expect, Page, test } from '@playwright/test';
+import { PLAYWRIGHT_BASIC_TEST_TAG_OBJ } from '../../constant/config';
 import { GlobalSettingOptions } from '../../constant/settings';
 import { redirectToHomePage } from '../../utils/common';
 import { settingClick } from '../../utils/sidebar';
@@ -33,7 +34,7 @@ test.use({
   storageState: 'playwright/.auth/admin.json',
 });
 
-test.describe('Cron Validations', () => {
+test.describe('Cron Validations', PLAYWRIGHT_BASIC_TEST_TAG_OBJ, () => {
   const cronInvlidMessage =
     'Cron expression must have exactly 5 fields (minute hour day-of-month month day-of-week)';
 
@@ -61,7 +62,7 @@ test.describe('Cron Validations', () => {
     await applicationResponse;
 
     await page.click('[data-testid="edit-button"]');
-    await page.waitForSelector('[data-testid="schedular-card-container"]');
+    await page.getByTestId('schedular-card-container').waitFor();
     await page
       .getByTestId('schedular-card-container')
       .getByText('Schedule', { exact: true })
@@ -74,9 +75,9 @@ test.describe('Cron Validations', () => {
 
     await page.click('.ant-select-dropdown:visible [title="Custom"]');
 
-    await page.waitForSelector(
-      '[data-testid="cron-container"] #schedular-form_cron'
-    );
+    await page
+      .locator('[data-testid="cron-container"] #schedular-form_cron')
+      .waitFor();
 
     // Check Valid Crons
 

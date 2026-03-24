@@ -19,6 +19,8 @@ import {
 } from '../../../../generated/type/tagLabel';
 import {
   MOCK_TEST_CASE,
+  MOCK_TEST_CASE_WITH_BOOLEAN_PARAM,
+  MOCK_TEST_DEFINITION_COLUMN_VALUES_TO_BE_IN_SET,
   MOCK_TEST_DEFINITION_COLUMN_VALUES_TO_MATCH_REGEX,
 } from '../../../../mocks/TestSuite.mock';
 import { getTestDefinitionById } from '../../../../rest/testAPI';
@@ -45,7 +47,43 @@ jest.mock('../../../common/RichTextEditor/RichTextEditor', () => {
 });
 
 jest.mock('./ParameterForm', () => {
-  return jest.fn().mockImplementation(() => <div>ParameterForm.component</div>);
+  const { Form } = require('antd');
+
+  function ParameterFormMock({
+    definition,
+  }: Readonly<{
+    definition?: {
+      parameterDefinition?: Array<{ name: string; dataType: string }>;
+    };
+  }>) {
+    let params: Record<string, unknown> = {};
+
+    try {
+      const form = Form.useFormInstance();
+      params = form.getFieldValue('params') ?? {};
+    } catch {
+      // no form context
+    }
+
+    const booleanParams = (definition?.parameterDefinition ?? []).filter(
+      (param) => param.dataType === 'BOOLEAN'
+    );
+
+    return (
+      <div>
+        ParameterForm.component
+        {booleanParams.map((param) => (
+          <button
+            aria-checked={params[param.name] ? 'true' : 'false'}
+            key={param.name}
+            role="switch"
+          />
+        ))}
+      </div>
+    );
+  }
+
+  return jest.fn().mockImplementation(ParameterFormMock);
 });
 
 jest.mock('../../../../pages/TasksPage/shared/TagSuggestion', () =>
@@ -59,13 +97,16 @@ jest.mock('../../../../pages/TasksPage/shared/TagSuggestion', () =>
 
 // Mock ServiceDocPanel component
 jest.mock('../../../common/ServiceDocPanel/ServiceDocPanel', () =>
-  jest
-    .fn()
-    .mockImplementation(({ activeField }) => (
-      <div data-testid="service-doc-panel">
-        ServiceDocPanel Component - Active Field: {activeField}
-      </div>
-    ))
+  jest.fn().mockImplementation(({ activeField, selectedEntity }) => (
+    <div data-testid="service-doc-panel">
+      ServiceDocPanel Component - Active Field: {activeField}
+      {selectedEntity && (
+        <div data-testid="service-doc-panel-entity-type">
+          {selectedEntity.entityType}
+        </div>
+      )}
+    </div>
+  ))
 );
 
 // Mock AlertBar component
@@ -463,6 +504,84 @@ describe('EditTestCaseModalV1 Component', () => {
     });
   });
 
+  it('should pass selectedEntity with entityType field to ServiceDocPanel', async () => {
+    await act(async () => {
+      render(<EditTestCaseModalV1 {...mockProps} />);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('service-doc-panel')).toBeInTheDocument();
+    });
+
+    const entityTypeElement = screen.getByTestId(
+      'service-doc-panel-entity-type'
+    );
+
+    expect(entityTypeElement).toBeInTheDocument();
+    expect(entityTypeElement).toHaveTextContent('table');
+  });
+
+  it('should preserve original table properties in selectedEntity', async () => {
+    const ServiceDocPanelMock = require('../../../common/ServiceDocPanel/ServiceDocPanel');
+
+    await act(async () => {
+      render(<EditTestCaseModalV1 {...mockProps} />);
+    });
+
+    await waitFor(
+      () => {
+        const calls = ServiceDocPanelMock.mock.calls;
+        const lastCall = calls[calls.length - 1];
+        if (lastCall && lastCall[0].selectedEntity) {
+          expect(lastCall[0].selectedEntity.id).toBeDefined();
+        }
+      },
+      { timeout: 5000 }
+    );
+
+    const callArgs =
+      ServiceDocPanelMock.mock.calls[
+        ServiceDocPanelMock.mock.calls.length - 1
+      ][0];
+    const { selectedEntity } = callArgs;
+
+    expect(selectedEntity).toBeDefined();
+    expect(selectedEntity.entityType).toBe('table');
+    expect(selectedEntity.id).toBe('table-id');
+    expect(selectedEntity.name).toBe('dim_address');
+    expect(selectedEntity.columns).toBeDefined();
+    expect(selectedEntity.columns[0].name).toBe('last_name');
+  });
+
+  it('should use EntityType.TABLE enum value for entityType', async () => {
+    const { EntityType } = require('../../../../enums/entity.enum');
+    const ServiceDocPanelMock = require('../../../common/ServiceDocPanel/ServiceDocPanel');
+
+    await act(async () => {
+      render(<EditTestCaseModalV1 {...mockProps} />);
+    });
+
+    await waitFor(
+      () => {
+        const calls = ServiceDocPanelMock.mock.calls;
+        const lastCall = calls[calls.length - 1];
+        if (lastCall && lastCall[0].selectedEntity) {
+          expect(lastCall[0].selectedEntity.id).toBeDefined();
+        }
+      },
+      { timeout: 5000 }
+    );
+
+    const callArgs =
+      ServiceDocPanelMock.mock.calls[
+        ServiceDocPanelMock.mock.calls.length - 1
+      ][0];
+    const { selectedEntity } = callArgs;
+
+    expect(selectedEntity.entityType).toBe(EntityType.TABLE);
+    expect(selectedEntity.entityType).toBe('table');
+  });
+
   it('should update activeField when field receives focus', async () => {
     render(<EditTestCaseModalV1 {...mockProps} />);
 
@@ -687,6 +806,82 @@ describe('EditTestCaseModalV1 Component', () => {
     });
 
     // Cleanup
-    document.body.removeChild(testElement);
+    testElement.remove();
+  });
+
+  it('should correctly convert boolean parameter values from string to boolean', async () => {
+    (getTestDefinitionById as jest.Mock).mockResolvedValue(
+      MOCK_TEST_DEFINITION_COLUMN_VALUES_TO_BE_IN_SET
+    );
+
+    const testCaseWithBooleanFalse = {
+      ...MOCK_TEST_CASE_WITH_BOOLEAN_PARAM,
+      parameterValues: [
+        {
+          name: 'allowedValues',
+          value: '["active","inactive","pending"]',
+        },
+        {
+          name: 'matchEnum',
+          value: 'false',
+        },
+      ],
+    };
+
+    render(
+      <EditTestCaseModalV1 {...mockProps} testCase={testCaseWithBooleanFalse} />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('edit-test-form')).toBeInTheDocument();
+    });
+
+    const switchElement = await waitFor(() => {
+      const el = document.querySelector('button[role="switch"]');
+
+      expect(el).toBeInTheDocument();
+
+      return el as HTMLButtonElement;
+    });
+
+    expect(switchElement.getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('should correctly convert boolean parameter values when value is "true"', async () => {
+    (getTestDefinitionById as jest.Mock).mockResolvedValue(
+      MOCK_TEST_DEFINITION_COLUMN_VALUES_TO_BE_IN_SET
+    );
+
+    const testCaseWithBooleanTrue = {
+      ...MOCK_TEST_CASE_WITH_BOOLEAN_PARAM,
+      parameterValues: [
+        {
+          name: 'allowedValues',
+          value: '["active","inactive","pending"]',
+        },
+        {
+          name: 'matchEnum',
+          value: 'true',
+        },
+      ],
+    };
+
+    render(
+      <EditTestCaseModalV1 {...mockProps} testCase={testCaseWithBooleanTrue} />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('edit-test-form')).toBeInTheDocument();
+    });
+
+    const switchElement = await waitFor(() => {
+      const el = document.querySelector('button[role="switch"]');
+
+      expect(el).toBeInTheDocument();
+
+      return el as HTMLButtonElement;
+    });
+
+    expect(switchElement.getAttribute('aria-checked')).toBe('true');
   });
 });

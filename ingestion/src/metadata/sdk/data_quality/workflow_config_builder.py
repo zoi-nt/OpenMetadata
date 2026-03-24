@@ -198,9 +198,7 @@ class WorkflowConfigBuilder:
 
         processor = Processor(
             type="orm-test-runner",
-            config=ComponentConfig(
-                root=processor_config.model_dump()  # pyright: ignore[reportUnknownMemberType]
-            ),
+            config=ComponentConfig(root=processor_config.model_dump()),
         )
 
         sink = Sink(type="metadata-rest", config=ComponentConfig(root={}))
@@ -220,6 +218,7 @@ class WorkflowConfigBuilder:
             ingestionPipelineFQN=None,
             pipelineRunId=None,
             enableStreamableLogs=self.enable_streamable_logs,
+            ingestionRunnerName=None,
         )
 
         return config

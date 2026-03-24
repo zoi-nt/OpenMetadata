@@ -18,6 +18,7 @@ import {
   screen,
   waitFor,
 } from '@testing-library/react';
+import { ReactNode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import {
   mockedGlossaryTerms,
@@ -25,6 +26,7 @@ import {
 } from '../../../mocks/Glossary.mock';
 import { findExpandableKeysForArray } from '../../../utils/GlossaryUtils';
 import GlossaryTermTab from './GlossaryTermTab.component';
+import { ModifiedGlossaryTerm } from './GlossaryTermTab.interface';
 
 const mockOnAddGlossaryTerm = jest.fn();
 const mockRefreshGlossaryTerms = jest.fn();
@@ -94,7 +96,9 @@ jest.mock('../../../utils/GlossaryUtils', () => ({
     reviewers: 180,
     actions: 100,
   }),
-  permissionForApproveOrReject: jest.fn().mockReturnValue(false),
+  permissionForApproveOrReject: jest
+    .fn()
+    .mockReturnValue({ permission: false, taskId: '' }),
 }));
 
 jest.mock('../../../utils/EntityStatusUtils', () => ({
@@ -144,11 +148,12 @@ jest.mock('../../../utils/TableColumn.util', () => ({
       render: () => <div>OwnerLabel</div>,
     },
   ]),
+  descriptionTableObject: jest.fn().mockImplementation(() => []),
 }));
 
 const mockUseGlossaryStore = {
   activeGlossary: mockedGlossaryTerms[0],
-  glossaryChildTerms: [] as any[],
+  glossaryChildTerms: [] as ModifiedGlossaryTerm[],
   updateActiveGlossary: jest.fn(),
   onAddGlossaryTerm: mockOnAddGlossaryTerm,
   onEditGlossaryTerm: mockOnEditGlossaryTerm,
@@ -186,7 +191,7 @@ jest.mock('../../../utils/ToastUtils', () => ({
 jest.mock('react-dnd', () => ({
   useDrag: jest.fn().mockReturnValue([{ isDragging: false }, jest.fn()]),
   useDrop: jest.fn().mockReturnValue([{ isOver: false }, jest.fn()]),
-  DndProvider: ({ children }: any) => <div>{children}</div>,
+  DndProvider: ({ children }: { children: ReactNode }) => <div>{children}</div>,
 }));
 
 jest.mock('react-dnd-html5-backend', () => ({
@@ -244,7 +249,7 @@ describe('Test GlossaryTermTab component', () => {
     // Reset store to default state
     Object.assign(mockUseGlossaryStore, {
       activeGlossary: mockedGlossaryTerms[0],
-      glossaryChildTerms: [] as any[],
+      glossaryChildTerms: [] as ModifiedGlossaryTerm[],
       updateActiveGlossary: jest.fn(),
       onAddGlossaryTerm: mockOnAddGlossaryTerm,
       onEditGlossaryTerm: mockOnEditGlossaryTerm,
@@ -431,6 +436,8 @@ describe('Test GlossaryTermTab component', () => {
       await waitFor(() => {
         const statusDropdown = screen.getByTestId('glossary-status-dropdown');
         fireEvent.click(statusDropdown);
+
+        expect(statusDropdown).toBeInTheDocument();
       });
     });
   });
@@ -790,10 +797,11 @@ describe('Test GlossaryTermTab component', () => {
       await waitFor(() => {
         const statusDropdown = screen.getByTestId('glossary-status-dropdown');
         fireEvent.click(statusDropdown);
-      });
 
-      // The dropdown menu should be rendered but we can't easily test the save action
-      // due to the complex dropdown structure
+        // The dropdown menu should be rendered but we can't easily test the save action
+        // due to the complex dropdown structure
+        expect(statusDropdown).toBeInTheDocument();
+      });
     });
 
     it('should handle status selection cancel action', async () => {
@@ -804,6 +812,8 @@ describe('Test GlossaryTermTab component', () => {
       await waitFor(() => {
         const statusDropdown = screen.getByTestId('glossary-status-dropdown');
         fireEvent.click(statusDropdown);
+
+        expect(statusDropdown).toBeInTheDocument();
       });
     });
   });
@@ -1000,8 +1010,55 @@ describe('Test GlossaryTermTab component', () => {
       });
     });
 
+    it('should handle terms with undefined description gracefully', async () => {
+      const termsWithUndefinedDescription = [
+        {
+          ...mockedGlossaryTerms[0],
+          description: undefined,
+        },
+      ];
+      mockUseGlossaryStore.glossaryChildTerms = termsWithUndefinedDescription;
+
+      render(<GlossaryTermTab isGlossary={false} />, {
+        wrapper: MemoryRouter,
+      });
+
+      await waitFor(() => {
+        const table = screen.getByTestId('glossary-terms-table');
+
+        expect(table).toBeInTheDocument();
+      });
+
+      // Should show no-description placeholder instead of crashing
+      expect(screen.getByText('label.no-description')).toBeInTheDocument();
+    });
+
+    it('should handle terms with null description gracefully', async () => {
+      const termsWithNullDescription = [
+        {
+          ...mockedGlossaryTerms[0],
+          description: null,
+        },
+      ];
+      mockUseGlossaryStore.glossaryChildTerms = termsWithNullDescription;
+
+      render(<GlossaryTermTab isGlossary={false} />, {
+        wrapper: MemoryRouter,
+      });
+
+      await waitFor(() => {
+        const table = screen.getByTestId('glossary-terms-table');
+
+        expect(table).toBeInTheDocument();
+      });
+
+      // Should show no-description placeholder instead of crashing
+      expect(screen.getByText('label.no-description')).toBeInTheDocument();
+    });
+
     it('should handle non-array glossaryChildTerms gracefully', async () => {
-      mockUseGlossaryStore.glossaryChildTerms = null as any;
+      mockUseGlossaryStore.glossaryChildTerms =
+        null as unknown as ModifiedGlossaryTerm[];
 
       render(<GlossaryTermTab isGlossary={false} />, {
         wrapper: MemoryRouter,

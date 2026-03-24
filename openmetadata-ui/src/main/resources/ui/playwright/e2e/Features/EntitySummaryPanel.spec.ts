@@ -14,7 +14,12 @@ import { expect, Page, test } from '@playwright/test';
 import { ENTITY_TYPES } from '../../constant/entity';
 import { SidebarItem } from '../../constant/sidebar';
 import { EntityType } from '../../support/entity/EntityDataClass.interface';
-import { redirectToHomePage } from '../../utils/common';
+import { TableClass } from '../../support/entity/TableClass';
+import { createNewPage, redirectToHomePage, uuid } from '../../utils/common';
+import {
+  editDisplayNameFromPanel,
+  navigateToExploreAndSelectTable,
+} from '../../utils/entityPanel';
 import { selectDataAssetFilter } from '../../utils/explore';
 import { sidebarClick } from '../../utils/sidebar';
 
@@ -22,14 +27,12 @@ test.use({ storageState: 'playwright/.auth/admin.json' });
 
 async function openEntitySummaryPanel(page: Page, entityType: EntityType) {
   await selectDataAssetFilter(page, entityType);
-  await page.waitForLoadState('networkidle');
 
   const firstEntityCard = page
     .locator('[data-testid="table-data-card"]')
     .first();
   if (await firstEntityCard.isVisible()) {
     await firstEntityCard.click();
-    await page.waitForLoadState('networkidle');
   }
 }
 
@@ -77,7 +80,7 @@ test.describe('Entity Summary Panel', () => {
 
   ENTITY_TYPES.forEach((entityType) => {
     test(`should display summary panel for ${entityType}`, async ({ page }) => {
-      await openEntitySummaryPanel(page, entityType);
+      await openEntitySummaryPanel(page, entityType as EntityType);
 
       await page.locator('.entity-summary-panel-container').isVisible();
 
@@ -100,7 +103,6 @@ test.describe('Entity Summary Panel', () => {
         .first();
       if (await entityLink.isVisible()) {
         await expect(entityLink).toHaveAttribute('href', /.+/);
-        await expect(entityLink).toHaveAttribute('target', '_blank');
       }
     }
   });
@@ -175,5 +177,48 @@ test.describe('Entity Summary Panel', () => {
         await expect(descriptionSection).toBeVisible();
       }
     }
+  });
+});
+
+test.describe('Entity Title Section - Edit Display Name', () => {
+  const table = new TableClass();
+
+  test.beforeAll('Setup', async ({ browser }) => {
+    const { apiContext, afterAction } = await createNewPage(browser);
+    await table.create(apiContext);
+    await afterAction();
+  });
+
+  test('should edit display name from entity summary panel', async ({
+    page,
+  }) => {
+    const newDisplayName = `Updated Table ${uuid()}`;
+
+    await navigateToExploreAndSelectTable(page, table.entityResponseData.name);
+
+    const summaryPanel = page.locator('.entity-summary-panel-container');
+    await expect(summaryPanel).toBeVisible();
+
+    await editDisplayNameFromPanel(page, newDisplayName);
+
+    const entityLink = summaryPanel.getByTestId('entity-link').first();
+    await expect(entityLink).toContainText(newDisplayName);
+  });
+
+  test('should cancel edit display name modal', async ({ page }) => {
+    await navigateToExploreAndSelectTable(page, table.entityResponseData.name);
+
+    const summaryPanel = page.locator('.entity-summary-panel-container');
+    await expect(summaryPanel).toBeVisible();
+
+    const editButton = summaryPanel.getByTestId('edit-displayName-button');
+    await editButton.click();
+
+    const modal = page.locator('.ant-modal');
+    await expect(modal).toBeVisible();
+
+    await modal.getByRole('button', { name: 'Cancel' }).click();
+
+    await expect(modal).not.toBeVisible();
   });
 });

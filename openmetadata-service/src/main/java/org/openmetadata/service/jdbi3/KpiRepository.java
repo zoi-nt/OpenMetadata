@@ -29,11 +29,11 @@ import org.openmetadata.service.Entity;
 import org.openmetadata.service.jdbi3.EntityTimeSeriesDAO.OrderBy;
 import org.openmetadata.service.resources.kpi.KpiResource;
 import org.openmetadata.service.util.EntityUtil;
+import org.openmetadata.service.util.EntityUtil.RelationIncludes;
 
 @Slf4j
 public class KpiRepository extends EntityRepository<Kpi> {
   private static final String KPI_RESULT_FIELD = "kpiResult";
-  public static final String COLLECTION_PATH = "/v1/kpi";
   private static final String UPDATE_FIELDS =
       "targetValue,dataInsightChart,startDate,endDate,metricType";
   private static final String PATCH_FIELDS =
@@ -50,7 +50,7 @@ public class KpiRepository extends EntityRepository<Kpi> {
   }
 
   @Override
-  public void setFields(Kpi kpi, EntityUtil.Fields fields) {
+  public void setFields(Kpi kpi, EntityUtil.Fields fields, RelationIncludes relationIncludes) {
     kpi.setDataInsightChart(
         fields.contains("dataInsightChart") ? getDataInsightChart(kpi) : kpi.getDataInsightChart());
     kpi.withKpiResult(
@@ -169,12 +169,25 @@ public class KpiRepository extends EntityRepository<Kpi> {
   }
 
   @Override
+  protected List<String> getFieldsStrippedFromStorageJson() {
+    return List.of("dataInsightChart", "kpiResult");
+  }
+
+  @Override
   public void storeEntity(Kpi kpi, boolean update) {
-    EntityReference dataInsightChart = kpi.getDataInsightChart();
-    KpiResult kpiResults = kpi.getKpiResult();
-    kpi.withDataInsightChart(null).withKpiResult(null);
     store(kpi, update);
-    kpi.withDataInsightChart(dataInsightChart).withKpiResult(kpiResults);
+  }
+
+  @Override
+  public void storeEntities(List<Kpi> entities) {
+    storeMany(entities);
+  }
+
+  @Override
+  protected void clearEntitySpecificRelationshipsForMany(List<Kpi> entities) {
+    if (entities.isEmpty()) return;
+    List<UUID> ids = entities.stream().map(Kpi::getId).toList();
+    deleteFromMany(ids, Entity.KPI, Relationship.USES, Entity.DATA_INSIGHT_CUSTOM_CHART);
   }
 
   @Override
@@ -245,19 +258,39 @@ public class KpiRepository extends EntityRepository<Kpi> {
     @Transaction
     @Override
     public void entitySpecificUpdate(boolean consolidatingChanges) {
-      updateToRelationship(
+      compareAndUpdate(
           "dataInsightChart",
-          KPI,
-          original.getId(),
-          Relationship.USES,
-          DATA_INSIGHT_CHART,
-          original.getDataInsightChart(),
-          updated.getDataInsightChart(),
-          false);
-      recordChange("targetValue", original.getTargetValue(), updated.getTargetValue(), true);
-      recordChange("startDate", original.getStartDate(), updated.getStartDate());
-      recordChange("endDate", original.getEndDate(), updated.getEndDate());
-      recordChange("metricType", original.getMetricType(), updated.getMetricType());
+          () -> {
+            updateToRelationship(
+                "dataInsightChart",
+                KPI,
+                original.getId(),
+                Relationship.USES,
+                DATA_INSIGHT_CHART,
+                original.getDataInsightChart(),
+                updated.getDataInsightChart(),
+                false);
+          });
+      compareAndUpdate(
+          "targetValue",
+          () -> {
+            recordChange("targetValue", original.getTargetValue(), updated.getTargetValue(), true);
+          });
+      compareAndUpdate(
+          "startDate",
+          () -> {
+            recordChange("startDate", original.getStartDate(), updated.getStartDate());
+          });
+      compareAndUpdate(
+          "endDate",
+          () -> {
+            recordChange("endDate", original.getEndDate(), updated.getEndDate());
+          });
+      compareAndUpdate(
+          "metricType",
+          () -> {
+            recordChange("metricType", original.getMetricType(), updated.getMetricType());
+          });
     }
   }
 }

@@ -154,7 +154,16 @@
         "null_value": 0
       },
       "votes": {
-        "type": "object"
+        "type": "object",
+        "dynamic": false,
+        "properties": {
+          "upVotes": {
+            "type": "integer"
+          },
+          "downVotes": {
+            "type": "integer"
+          }
+        }
       },
       "entityLink": {
         "type": "keyword",
@@ -244,6 +253,7 @@
         "type": "keyword"
       },
       "owners": {
+        "type": "nested",
         "properties": {
           "id": {
             "type": "keyword",
@@ -471,7 +481,6 @@
         }
       },
       "tags": {
-        "type": "nested",
         "properties": {
           "tagFQN": {
             "type": "keyword",
@@ -496,7 +505,8 @@
           "state": {
             "type": "keyword"
           }
-        }
+        },
+        "type": "nested"
       },
       "tier": {
         "properties": {
@@ -797,6 +807,14 @@
             "type": "text"
           }
         }
+      },
+      "ownerDisplayName": {
+        "type": "keyword",
+        "normalizer": "lowercase_normalizer"
+      },
+      "ownerName": {
+        "type": "keyword",
+        "normalizer": "lowercase_normalizer"
       }
     }
   }

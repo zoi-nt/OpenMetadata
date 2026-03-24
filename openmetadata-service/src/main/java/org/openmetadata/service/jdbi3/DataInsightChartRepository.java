@@ -3,15 +3,17 @@ package org.openmetadata.service.jdbi3;
 import static org.openmetadata.common.utils.CommonUtil.listOf;
 import static org.openmetadata.service.Entity.DATA_INSIGHT_CHART;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import org.openmetadata.schema.dataInsight.DataInsightChart;
 import org.openmetadata.schema.dataInsight.DataInsightChartResult;
 import org.openmetadata.service.Entity;
+import org.openmetadata.service.resources.datainsight.DataInsightChartResource;
 import org.openmetadata.service.util.EntityUtil;
+import org.openmetadata.service.util.EntityUtil.RelationIncludes;
 
 public class DataInsightChartRepository extends EntityRepository<DataInsightChart> {
-  public static final String COLLECTION_PATH = "/v1/analytics/dataInsights/charts";
   public static final String LAST_SESSION = "lastSession";
   public static final String DATA_ENTITY_TYPE = "data.entityType";
   public static final String TIMESTAMP = "timestamp";
@@ -71,7 +73,7 @@ public class DataInsightChartRepository extends EntityRepository<DataInsightChar
 
   public DataInsightChartRepository() {
     super(
-        COLLECTION_PATH,
+        DataInsightChartResource.COLLECTION_PATH,
         DATA_INSIGHT_CHART,
         DataInsightChart.class,
         Entity.getCollectionDAO().dataInsightChartDAO(),
@@ -80,7 +82,8 @@ public class DataInsightChartRepository extends EntityRepository<DataInsightChar
   }
 
   @Override
-  public void setFields(DataInsightChart entity, EntityUtil.Fields fields) {
+  public void setFields(
+      DataInsightChart entity, EntityUtil.Fields fields, RelationIncludes relationIncludes) {
     /* Nothing to do */
   }
 
@@ -97,6 +100,17 @@ public class DataInsightChartRepository extends EntityRepository<DataInsightChar
   @Override
   public void storeEntity(DataInsightChart entity, boolean update) {
     store(entity, update);
+  }
+
+  @Override
+  public void storeEntities(List<DataInsightChart> entities) {
+    List<String> fqns = new ArrayList<>(entities.size());
+    List<String> jsons = new ArrayList<>(entities.size());
+    for (DataInsightChart entity : entities) {
+      fqns.add(entity.getFullyQualifiedName());
+      jsons.add(serializeForStorage(entity));
+    }
+    dao.insertMany(dao.getTableName(), dao.getNameHashColumn(), fqns, jsons);
   }
 
   @Override

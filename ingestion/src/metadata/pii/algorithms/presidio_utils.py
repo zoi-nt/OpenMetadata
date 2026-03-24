@@ -13,7 +13,22 @@ Utilities for working with the Presidio Library.
 """
 import inspect
 import logging
-from typing import Any, Callable, Iterable, List, Optional, Set, Type, Union, cast
+import types
+from functools import cache, wraps
+from itertools import groupby
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    Type,
+    Union,
+    cast,
+)
 
 import spacy
 from dateutil import parser
@@ -31,22 +46,40 @@ from presidio_analyzer.predefined_recognizers import (
     CreditCardRecognizer,
     DateRecognizer,
     NhsRecognizer,
+    UsBankRecognizer,
     UsLicenseRecognizer,
 )
 from spacy.cli.download import download  # pyright: ignore[reportUnknownVariableType]
 
-from metadata.pii.algorithms import patterns
-from metadata.pii.constants import PRESIDIO_LOGGER, SPACY_EN_MODEL, SUPPORTED_LANG
+from metadata.generated.schema.type.classificationLanguages import (
+    ClassificationLanguage,
+)
+from metadata.pii.algorithms import patterns, presidio_constants
+from metadata.pii.constants import (
+    LANGUAGE_MODEL_MAPPING,
+    PRESIDIO_LOGGER,
+    SPACY_EN_MODEL,
+    SUPPORTED_LANG,
+)
 from metadata.utils.dispatch import class_register
 from metadata.utils.logger import pii_logger
 
 logger = pii_logger()
 
 
+@cache
 def load_nlp_engine(
-    model_name: str = SPACY_EN_MODEL,
-    supported_language: str = SUPPORTED_LANG,
+    model_name: Optional[str] = None,
+    supported_language: Optional[str] = None,
+    classification_language: Optional[ClassificationLanguage] = None,
 ) -> SpacyNlpEngine:
+    if classification_language:
+        model_name = get_model_for_language(classification_language)
+        supported_language = classification_language.value
+    else:
+        model_name = model_name or SPACY_EN_MODEL
+        supported_language = supported_language or SUPPORTED_LANG
+
     _load_spacy_model(model_name)
     model = {
         "lang_code": supported_language,
@@ -55,24 +88,31 @@ def load_nlp_engine(
     return SpacyNlpEngine(models=[model])
 
 
+def get_model_for_language(language: ClassificationLanguage) -> str:
+    return LANGUAGE_MODEL_MAPPING[language]
+
+
 def build_analyzer_engine(
-    model_name: str = SPACY_EN_MODEL,
+    language: ClassificationLanguage = ClassificationLanguage.en,
 ) -> AnalyzerEngine:
     """
-    Build a Presidio analyzer engine for the model_name and tailored to our use case.
+    Build a Presidio analyzer engine for the language and tailored to our use case.
 
     If the model is not found locally, it will be downloaded.
     """
+    model_name = get_model_for_language(language)
+    supported_language = language.value
+
     nlp_engine = load_nlp_engine(
-        model_name=model_name, supported_language=SUPPORTED_LANG
+        model_name=model_name, supported_language=supported_language
     )
     recognizer_registry = RecognizerRegistry(
         recognizers=list(_get_all_pattern_recognizers()),
-        supported_languages=[SUPPORTED_LANG],
+        supported_languages=[supported_language],
     )
     analyzer_engine = AnalyzerEngine(
         nlp_engine=nlp_engine,
-        supported_languages=[SUPPORTED_LANG],
+        supported_languages=[supported_language],
         registry=recognizer_registry,
     )
 
@@ -250,6 +290,63 @@ def date_recognizer(**kwargs: Any) -> ValidatedDateRecognizer:
     return ValidatedDateRecognizer(**kwargs)
 
 
+class ContextAwareUsBankRecognizer(UsBankRecognizer):
+    def enhance_using_context(
+        self,
+        text: str,
+        raw_recognizer_results: List[RecognizerResult],
+        other_raw_recognizer_results: List[RecognizerResult],
+        nlp_artifacts: NlpArtifacts,
+        context: Optional[List[str]] = None,
+    ) -> List[RecognizerResult]:
+        """Enhance confidence score using context of the entity.
+
+        Boosts the very low scores of the patterns
+
+        :param text: The actual text that was analyzed
+        :param raw_recognizer_results: This recognizer's results, to be updated
+        based on recognizer specific context.
+        :param other_raw_recognizer_results: Other recognizer results matched in
+        the given text to allow related entity context enhancement
+        :param nlp_artifacts: The nlp artifacts contains elements
+                              such as lemmatized tokens for better
+                              accuracy of the context enhancement process
+        :param context: list of context words
+        """
+        if context is None:
+            return raw_recognizer_results
+
+        context_lower = " ".join(context).lower()
+
+        for result in raw_recognizer_results:
+            # if previously enhanced, then ignore
+            if result.recognition_metadata.get(  # pyright: ignore[reportUnknownMemberType]
+                RecognizerResult.IS_SCORE_ENHANCED_BY_CONTEXT_KEY
+            ):
+                continue
+
+            if any(ctx_word.lower() in context_lower for ctx_word in self.context):
+                original_score = result.score
+                result.score = self.MAX_SCORE
+
+                result.recognition_metadata[  # pyright: ignore[reportUnknownMemberType]
+                    RecognizerResult.IS_SCORE_ENHANCED_BY_CONTEXT_KEY
+                ] = True
+
+                logger.debug(
+                    f"Enhanced {result.entity_type} score: {original_score:.2f} → {result.score:.2f} (context: {self.context})"
+                )
+
+        return raw_recognizer_results
+
+
+@recognizer_factories.add(  # pyright: ignore[reportUnknownMemberType, reportUntypedFunctionDecorator]
+    UsBankRecognizer
+)
+def eager_us_bank_recognizer(**kwargs: Any) -> ContextAwareUsBankRecognizer:
+    return ContextAwareUsBankRecognizer(**kwargs)
+
+
 def _get_all_pattern_recognizers() -> Iterable[EntityRecognizer]:
     for cls in _get_all_entity_recognizer_classes():
         if issubclass(cls, PatternRecognizer):
@@ -290,3 +387,172 @@ def apply_confidence_threshold(
         return recognizer
 
     return decorate_entity_recognizer
+
+
+def enhance_using_context(recognizer: EntityRecognizer) -> EntityRecognizer:
+    MIN_SCORE_FOR_ENHANCEMENT = 0.3
+    old_enhancing_function = recognizer.enhance_using_context
+
+    @wraps(old_enhancing_function)
+    def wrapped(
+        rec: EntityRecognizer,
+        text: str,
+        raw_recognizer_results: List[RecognizerResult],
+        other_raw_recognizer_results: List[RecognizerResult],
+        nlp_artifacts: NlpArtifacts,
+        context: Optional[List[str]] = None,
+    ) -> List[RecognizerResult]:
+        results = old_enhancing_function(
+            text,
+            raw_recognizer_results,
+            other_raw_recognizer_results,
+            nlp_artifacts,
+            context,
+        )
+
+        if not rec.context or not context:
+            # If no context is given or the recognizer does not support it,
+            # then ignore this
+            return results
+
+        context_lower = " ".join(context).lower()
+
+        for result in results:
+            # if previously enhanced, then ignore
+            if result.recognition_metadata.get(  # pyright: ignore[reportUnknownMemberType]
+                RecognizerResult.IS_SCORE_ENHANCED_BY_CONTEXT_KEY
+            ):
+                continue
+
+            # Skip boosting scores that are too low
+            if result.score < MIN_SCORE_FOR_ENHANCEMENT:
+                continue
+
+            if any(ctx_word.lower() in context_lower for ctx_word in rec.context):
+                original_score = result.score
+                result.score = rec.MAX_SCORE
+
+                result.recognition_metadata[  # pyright: ignore[reportUnknownMemberType]
+                    RecognizerResult.IS_SCORE_ENHANCED_BY_CONTEXT_KEY
+                ] = True
+
+                logger.debug(
+                    f"Enhanced {result.entity_type} score: {original_score:.2f} → {result.score:.2f} (context: {rec.context})"
+                )
+
+        return results
+
+    recognizer.enhance_using_context = types.MethodType(wrapped, recognizer)
+
+    return recognizer
+
+
+def filter_enhanced_results_below_threshold(
+    threshold: float,
+) -> Callable[[EntityRecognizer], EntityRecognizer]:
+    def decorate_entity_recognizer(recognizer: EntityRecognizer) -> EntityRecognizer:
+        old_enhancing_function = recognizer.enhance_using_context
+
+        @wraps(old_enhancing_function)
+        def wrapped(
+            rec: EntityRecognizer,  # pyright: ignore[reportUnusedParameter]
+            text: str,
+            raw_recognizer_results: List[RecognizerResult],
+            other_raw_recognizer_results: List[RecognizerResult],
+            nlp_artifacts: NlpArtifacts,
+            context: Optional[List[str]] = None,
+        ) -> List[RecognizerResult]:
+            results = old_enhancing_function(
+                text,
+                raw_recognizer_results,
+                other_raw_recognizer_results,
+                nlp_artifacts,
+                context,
+            )
+
+            return [result for result in results if result.score >= threshold]
+
+        recognizer.enhance_using_context = types.MethodType(wrapped, recognizer)
+        return recognizer
+
+    return decorate_entity_recognizer
+
+
+def decorate_recognizer(
+    *decorators: Callable[[EntityRecognizer], EntityRecognizer]
+) -> Callable[[EntityRecognizer], EntityRecognizer]:
+    def decorator(recognizer: EntityRecognizer) -> EntityRecognizer:
+        decorated = recognizer
+        for dec in decorators:
+            decorated = dec(decorated)
+        return decorated
+
+    return decorator
+
+
+def explain_recognition_results(results: List[RecognizerResult]) -> str:
+    """Builds a verbose explanation of the recognition results taking into account multiple values"""
+
+    def _get_getter(res: RecognizerResult) -> str:
+        return cast(Dict[str, str], res.recognition_metadata).get(
+            presidio_constants.RECOGNIZER_METADATA_IDENTIFIER,
+            presidio_constants.DEFAULT_RECOGNIZER_IDENTIFIER,
+        )
+
+    grouped_results: groupby[str, RecognizerResult] = groupby(
+        sorted(results, key=_get_getter),
+        key=_get_getter,
+    )
+
+    textual_explanation = ""
+    for recognizer_identifier, group in grouped_results:
+        group_list = list(group)
+
+        recognizer_name: str = cast(
+            Dict[str, str], group_list[0].recognition_metadata
+        ).get(presidio_constants.RECOGNIZER_METADATA_NAME, recognizer_identifier)
+        results_count = len(group_list)
+        results_score = sum(r.score for r in group_list) / results_count
+        maybe_plural_time = "time" if results_count == 1 else "times"
+
+        textual_explanation += (
+            presidio_constants.TEXTUAL_EXPLANATION_TEMPLATE.format(
+                recognizer_name=recognizer_name,
+                results_count=results_count,
+                maybe_plural_time=maybe_plural_time,
+                results_score=results_score,
+            )
+            + "\n"
+        )
+
+        patterns_matched: Set[Tuple[str, float]] = set()
+        for result in group_list:
+            if (
+                result.analysis_explanation
+                is None  # pyright: ignore[reportUnnecessaryComparison]
+                or result.analysis_explanation.pattern
+                is None  # pyright: ignore[reportUnnecessaryComparison]
+            ):
+                continue
+
+            patterns_matched.add(
+                (result.analysis_explanation.pattern, result.analysis_explanation.score)
+            )
+
+        if patterns_matched:
+            textual_explanation += (
+                presidio_constants.TEXTUAL_EXPLANATION_PATTERN_HEADER_TEMPLATE + "\n"
+            )
+            for pattern, score in sorted(
+                patterns_matched, key=lambda o: o[1], reverse=True
+            ):
+                textual_explanation += (
+                    presidio_constants.TEXTUAL_EXPLANATION_PATTERN_ITEM_TEMPLATE.format(
+                        pattern=pattern, score=score
+                    )
+                    + "\n"
+                )
+
+        textual_explanation += "\n"
+
+    return textual_explanation

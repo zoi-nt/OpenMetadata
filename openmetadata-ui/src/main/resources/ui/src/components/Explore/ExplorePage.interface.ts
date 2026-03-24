@@ -60,10 +60,12 @@ export type UrlParams = {
 export type ExploreSearchIndex =
   | SearchIndex.DATA_PRODUCT
   | SearchIndex.TABLE
+  | SearchIndex.COLUMN
   | SearchIndex.PIPELINE
   | SearchIndex.DASHBOARD
   | SearchIndex.DATABASE
   | SearchIndex.DATABASE_SCHEMA
+  | SearchIndex.CHART
   | SearchIndex.MLMODEL
   | SearchIndex.TOPIC
   | SearchIndex.CONTAINER
@@ -72,13 +74,13 @@ export type ExploreSearchIndex =
   | SearchIndex.SEARCH_INDEX
   | SearchIndex.STORED_PROCEDURE
   | SearchIndex.DASHBOARD_DATA_MODEL
-  | SearchIndex.API_COLLECTION_INDEX
-  | SearchIndex.API_ENDPOINT_INDEX
-  | SearchIndex.METRIC_SEARCH_INDEX
-  | SearchIndex.DIRECTORY_SEARCH_INDEX
-  | SearchIndex.FILE_SEARCH_INDEX
-  | SearchIndex.SPREADSHEET_SEARCH_INDEX
-  | SearchIndex.WORKSHEET_SEARCH_INDEX;
+  | SearchIndex.API_COLLECTION
+  | SearchIndex.API_ENDPOINT
+  | SearchIndex.METRIC
+  | SearchIndex.DIRECTORY
+  | SearchIndex.FILE
+  | SearchIndex.SPREADSHEET
+  | SearchIndex.WORKSHEET;
 
 export type SearchHitCounts = Record<ExploreSearchIndex, number>;
 
@@ -117,7 +119,14 @@ export interface ExploreQuickFilterField {
   key: string;
   label: string;
   labelKeyOptions?: Record<string, string | number | boolean>;
+  options?: SearchDropdownOption[];
   value?: SearchDropdownOption[];
+  hideCounts?: boolean;
+  hideSearchBar?: boolean;
+  searchIndex?: SearchIndex;
+  searchKey?: string;
+  dropdownClassName?: string;
+  singleSelect?: boolean;
 }
 
 // Type for all the explore tab entities

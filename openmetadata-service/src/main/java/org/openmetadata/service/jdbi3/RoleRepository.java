@@ -37,6 +37,7 @@ import org.openmetadata.service.resources.teams.RoleResource;
 import org.openmetadata.service.security.policyevaluator.SubjectCache;
 import org.openmetadata.service.util.EntityUtil;
 import org.openmetadata.service.util.EntityUtil.Fields;
+import org.openmetadata.service.util.EntityUtil.RelationIncludes;
 
 @Slf4j
 public class RoleRepository extends EntityRepository<Role> {
@@ -54,7 +55,7 @@ public class RoleRepository extends EntityRepository<Role> {
   }
 
   @Override
-  public void setFields(Role role, Fields fields) {
+  public void setFields(Role role, Fields fields, RelationIncludes relationIncludes) {
     role.setPolicies(fields.contains(POLICIES) ? getPolicies(role) : role.getPolicies());
     role.setTeams(fields.contains("teams") ? getTeams(role) : role.getTeams());
     role.withUsers(fields.contains("users") ? getUsers(role) : role.getUsers());
@@ -198,12 +199,25 @@ public class RoleRepository extends EntityRepository<Role> {
    * <p>This method ensures that the role and its policy are stored correctly.
    */
   @Override
+  protected List<String> getFieldsStrippedFromStorageJson() {
+    return List.of("policies");
+  }
+
+  @Override
   public void storeEntity(Role role, boolean update) {
-    // Don't store policy. Build it on the fly based on relationships
-    List<EntityReference> policies = role.getPolicies();
-    role.withPolicies(null);
     store(role, update);
-    role.withPolicies(policies);
+  }
+
+  @Override
+  public void storeEntities(List<Role> entities) {
+    storeMany(entities);
+  }
+
+  @Override
+  protected void clearEntitySpecificRelationshipsForMany(List<Role> entities) {
+    if (entities.isEmpty()) return;
+    List<UUID> ids = entities.stream().map(Role::getId).toList();
+    deleteFromMany(ids, Entity.ROLE, Relationship.HAS, Entity.POLICY);
   }
 
   @Override
@@ -236,9 +250,12 @@ public class RoleRepository extends EntityRepository<Role> {
     @Transaction
     @Override
     public void entitySpecificUpdate(boolean consolidatingChanges) {
-      updatePolicies(listOrEmpty(original.getPolicies()), listOrEmpty(updated.getPolicies()));
-      // Invalidate policy cache when role policies change
-      SubjectCache.invalidateAll();
+      compareAndUpdate(
+          "policies",
+          () -> {
+            updatePolicies(listOrEmpty(original.getPolicies()), listOrEmpty(updated.getPolicies()));
+            SubjectCache.invalidateAll();
+          });
     }
 
     private void updatePolicies(

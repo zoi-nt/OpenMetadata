@@ -11,9 +11,17 @@
  *  limitations under the License.
  */
 
-import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
-import { Box, Chip, Tooltip, Typography } from '@mui/material';
+import {
+  Box,
+  Chip,
+  FormLabel,
+  SxProps,
+  Theme,
+  Tooltip,
+  useTheme,
+} from '@mui/material';
 import { TooltipProps } from '@mui/material/Tooltip';
+import { InfoCircle } from '@untitledui/icons';
 import { FC, ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { HelperTextType } from '../../../interface/FormUtils.interface';
@@ -24,11 +32,10 @@ export interface MUIFormItemLabelProps {
   helperTextType?: HelperTextType;
   showHelperText?: boolean;
   placement?: TooltipProps['placement'];
-  overlayClassName?: string;
-  overlayInnerStyle?: React.CSSProperties;
-  align?: TooltipProps['placement'];
   isBeta?: boolean;
+  required?: boolean;
   slotProps?: Partial<TooltipProps>;
+  labelSx?: SxProps<Theme>;
 }
 
 const MUIFormItemLabel: FC<MUIFormItemLabelProps> = ({
@@ -36,20 +43,27 @@ const MUIFormItemLabel: FC<MUIFormItemLabelProps> = ({
   helperTextType = HelperTextType.Tooltip,
   isBeta = false,
   label,
+  labelSx,
   placement = 'top',
+  required = false,
   showHelperText = true,
   slotProps,
 }) => {
   const { t } = useTranslation();
+  const theme = useTheme();
 
   return (
     <Box alignItems="center" display="inline-flex" gap={0.5}>
-      <Typography
+      <FormLabel
         component="span"
         data-testid="mui-form-item-label"
-        variant="body2">
+        required={required}
+        sx={{
+          fontSize: (theme) => theme.typography.body2.fontSize,
+          ...labelSx,
+        }}>
         {label}
-      </Typography>
+      </FormLabel>
       {helperTextType === HelperTextType.Tooltip &&
         helperText &&
         showHelperText && (
@@ -62,17 +76,17 @@ const MUIFormItemLabel: FC<MUIFormItemLabelProps> = ({
               <Box
                 component="span"
                 sx={{
-                  display: 'inline-flex',
+                  display: 'flex',
                   alignItems: 'center',
                   cursor: 'help',
                   lineHeight: 0,
                   pointerEvents: 'auto',
                 }}>
-                <InfoOutlinedIcon
+                <InfoCircle
+                  color={theme.palette.text.secondary}
                   data-testid="mui-helper-icon"
-                  sx={{
-                    fontSize: 16,
-                    color: 'text.secondary',
+                  size={14}
+                  style={{
                     pointerEvents: 'auto',
                   }}
                 />

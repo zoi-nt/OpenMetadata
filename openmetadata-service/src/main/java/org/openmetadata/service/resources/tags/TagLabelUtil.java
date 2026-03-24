@@ -57,54 +57,88 @@ public class TagLabelUtil {
 
   public static Map<String, List<TagLabel>> populateTagLabel(
       List<CollectionDAO.TagUsageDAO.TagLabelWithFQNHash> tagUsages) {
-    Map<String, List<String>> tagFqnMap = new HashMap<>();
-    Map<String, List<String>> termFqnMap = new HashMap<>();
+    Map<String, List<CollectionDAO.TagUsageDAO.TagLabelWithFQNHash>> usagesByTarget =
+        new HashMap<>();
+    Set<String> allTagFqns = new HashSet<>();
+    Set<String> allTermFqns = new HashSet<>();
 
     for (CollectionDAO.TagUsageDAO.TagLabelWithFQNHash usage : tagUsages) {
-      String targetHash = usage.getTargetFQNHash();
-      String tagFQN = usage.getTagFQN();
-
+      usagesByTarget.computeIfAbsent(usage.getTargetFQNHash(), k -> new ArrayList<>()).add(usage);
       if (usage.getSource() == TagSource.CLASSIFICATION.ordinal()) {
-        tagFqnMap.computeIfAbsent(targetHash, k -> new ArrayList<>()).add(tagFQN);
+        allTagFqns.add(usage.getTagFQN());
       } else if (usage.getSource() == TagSource.GLOSSARY.ordinal()) {
-        termFqnMap.computeIfAbsent(targetHash, k -> new ArrayList<>()).add(tagFQN);
+        allTermFqns.add(usage.getTagFQN());
       }
     }
 
-    Set<String> allTargetHashes = new HashSet<>();
-    allTargetHashes.addAll(tagFqnMap.keySet());
-    allTargetHashes.addAll(termFqnMap.keySet());
-
     Map<String, List<TagLabel>> result = new HashMap<>();
+    Map<String, TagLabel> tagLabelsByFqn = new HashMap<>();
+    Map<String, TagLabel> termLabelsByFqn = new HashMap<>();
 
-    for (String targetHash : allTargetHashes) {
-      List<TagLabel> tagLabels = new ArrayList<>();
-
-      List<String> tagFQNs = tagFqnMap.getOrDefault(targetHash, Collections.emptyList());
-      List<String> termFQNs = termFqnMap.getOrDefault(targetHash, Collections.emptyList());
-
+    if (!allTagFqns.isEmpty()) {
       try {
-        Tag[] tags = getTags(tagFQNs).toArray(new Tag[0]);
-        tagLabels.addAll(listOrEmpty(EntityUtil.toTagLabels(tags)));
+        getTags(new ArrayList<>(allTagFqns))
+            .forEach(
+                tag -> {
+                  TagLabel label = EntityUtil.toTagLabel(tag);
+                  if (label != null) {
+                    tagLabelsByFqn.put(tag.getFullyQualifiedName(), label);
+                  }
+                });
       } catch (Exception ex) {
         LOG.warn(
-            "Failed to fetch classification tags for target {}. Skipping these tags. Error: {}",
-            targetHash,
+            "Failed to batch fetch classification tags for {} targets. Skipping classification tags. Error: {}",
+            usagesByTarget.size(),
             ex.getMessage());
       }
+    }
 
+    if (!allTermFqns.isEmpty()) {
       try {
-        GlossaryTerm[] terms = getGlossaryTerms(termFQNs).toArray(new GlossaryTerm[0]);
-        tagLabels.addAll(listOrEmpty(EntityUtil.toTagLabels(terms)));
+        getGlossaryTerms(new ArrayList<>(allTermFqns))
+            .forEach(
+                term -> {
+                  TagLabel label = EntityUtil.toTagLabel(term);
+                  if (label != null) {
+                    termLabelsByFqn.put(term.getFullyQualifiedName(), label);
+                  }
+                });
       } catch (Exception ex) {
         LOG.warn(
-            "Failed to fetch glossary terms {} for target {}. Skipping these terms. Error: {}",
-            termFQNs,
-            targetHash,
+            "Failed to batch fetch glossary terms for {} targets. Skipping glossary tags. Error: {}",
+            usagesByTarget.size(),
             ex.getMessage());
       }
+    }
 
-      result.put(targetHash, tagLabels);
+    for (Map.Entry<String, List<CollectionDAO.TagUsageDAO.TagLabelWithFQNHash>> entry :
+        usagesByTarget.entrySet()) {
+      String targetHash = entry.getKey();
+      Set<TagLabel> tagLabels = new TreeSet<>(compareTagLabel);
+      for (CollectionDAO.TagUsageDAO.TagLabelWithFQNHash usage : entry.getValue()) {
+        TagLabel label =
+            new TagLabel()
+                .withSource(TagSource.values()[usage.getSource()])
+                .withTagFQN(usage.getTagFQN())
+                .withLabelType(TagLabel.LabelType.values()[usage.getLabelType()])
+                .withState(TagLabel.State.values()[usage.getState()])
+                .withReason(usage.getReason())
+                .withAppliedAt(usage.getAppliedAt())
+                .withAppliedBy(usage.getAppliedBy())
+                .withMetadata(usage.getMetadata());
+        TagLabel commonFields =
+            usage.getSource() == TagSource.CLASSIFICATION.ordinal()
+                ? tagLabelsByFqn.get(usage.getTagFQN())
+                : termLabelsByFqn.get(usage.getTagFQN());
+        if (commonFields != null) {
+          label.setName(commonFields.getName());
+          label.setDisplayName(commonFields.getDisplayName());
+          label.setDescription(commonFields.getDescription());
+          label.setStyle(commonFields.getStyle());
+        }
+        tagLabels.add(label);
+      }
+      result.put(targetHash, new ArrayList<>(tagLabels));
     }
 
     return result;
@@ -254,6 +288,68 @@ public class TagLabelUtil {
     return Collections.emptyList();
   }
 
+  /**
+   * Batch fetch derived tags for all glossary term tags in the provided list. This is an
+   * optimization to fetch all derived tags in a single query instead of N queries.
+   *
+   * @param tagLabels the tag labels to fetch derived tags for
+   * @return a map from glossary term FQN to its derived tags
+   */
+  public static Map<String, List<TagLabel>> batchFetchDerivedTags(List<TagLabel> tagLabels) {
+    if (nullOrEmpty(tagLabels)) {
+      return Collections.emptyMap();
+    }
+
+    // Collect all unique glossary term FQNs
+    List<String> glossaryTermFqns =
+        tagLabels.stream()
+            .filter(Objects::nonNull)
+            .filter(tag -> tag.getSource() == TagLabel.TagSource.GLOSSARY)
+            .map(TagLabel::getTagFQN)
+            .distinct()
+            .collect(Collectors.toList());
+
+    if (glossaryTermFqns.isEmpty()) {
+      return Collections.emptyMap();
+    }
+
+    return Entity.getCollectionDAO().tagUsageDAO().getDerivedTagsBatch(glossaryTermFqns);
+  }
+
+  /**
+   * Add derived tags using a pre-fetched map. This avoids N+1 queries when processing multiple
+   * entities in batch operations.
+   *
+   * @param tagLabels the tag labels to add derived tags to
+   * @param derivedTagsMap pre-fetched map from glossary term FQN to derived tags
+   * @return the tag labels with derived tags added
+   */
+  public static List<TagLabel> addDerivedTagsWithPreFetched(
+      List<TagLabel> tagLabels, Map<String, List<TagLabel>> derivedTagsMap) {
+    if (nullOrEmpty(tagLabels)) {
+      return tagLabels;
+    }
+
+    List<TagLabel> filteredTags =
+        tagLabels.stream()
+            .filter(Objects::nonNull)
+            .filter(tag -> tag.getLabelType() != TagLabel.LabelType.DERIVED)
+            .toList();
+
+    List<TagLabel> updatedTagLabels = new ArrayList<>();
+    EntityUtil.mergeTags(updatedTagLabels, filteredTags);
+
+    for (TagLabel tagLabel : tagLabels) {
+      if (tagLabel != null && tagLabel.getSource() == TagLabel.TagSource.GLOSSARY) {
+        List<TagLabel> derivedTags =
+            derivedTagsMap.getOrDefault(tagLabel.getTagFQN(), Collections.emptyList());
+        EntityUtil.mergeTags(updatedTagLabels, derivedTags);
+      }
+    }
+    updatedTagLabels.sort(compareTagLabel);
+    return updatedTagLabels;
+  }
+
   public static List<TagLabel> getUniqueTags(List<TagLabel> tags) {
     Set<TagLabel> uniqueTags = new TreeSet<>(compareTagLabel);
     uniqueTags.addAll(tags);
@@ -273,11 +369,70 @@ public class TagLabelUtil {
     }
   }
 
+  public static List<TagLabel> mergeTagsWithIncomingPrecedence(
+      List<TagLabel> existingTags, List<TagLabel> incomingTags) {
+    if (nullOrEmpty(incomingTags)) {
+      return new ArrayList<>(listOrEmpty(existingTags));
+    }
+    Set<String> incomingParents =
+        listOrEmpty(incomingTags).stream()
+            .map(t -> FullyQualifiedName.getParentFQN(t.getTagFQN()))
+            .collect(Collectors.toSet());
+
+    List<TagLabel> result = new ArrayList<>();
+    for (TagLabel existing : listOrEmpty(existingTags)) {
+      String existingParent = FullyQualifiedName.getParentFQN(existing.getTagFQN());
+      boolean isMutuallyExclusive = false;
+      try {
+        isMutuallyExclusive = mutuallyExclusive(existing);
+      } catch (Exception ex) {
+        LOG.warn(
+            "Could not check mutual exclusivity for tag '{}': {}",
+            existing.getTagFQN(),
+            ex.getMessage());
+      }
+      if (isMutuallyExclusive && incomingParents.contains(existingParent)) {
+        continue;
+      }
+      result.add(existing);
+    }
+    Set<String> resultFQNs = result.stream().map(TagLabel::getTagFQN).collect(Collectors.toSet());
+    for (TagLabel incoming : incomingTags) {
+      if (!resultFQNs.contains(incoming.getTagFQN())) {
+        result.add(incoming);
+      }
+    }
+    return result;
+  }
+
   public static void checkDisabledTags(List<TagLabel> tagLabels) {
+    if (nullOrEmpty(tagLabels)) {
+      return;
+    }
+
+    // Collect all unique classification tag FQNs
+    List<String> classificationFqns =
+        listOrEmpty(tagLabels).stream()
+            .filter(tag -> tag.getSource().equals(TagSource.CLASSIFICATION))
+            .map(TagLabel::getTagFQN)
+            .distinct()
+            .collect(Collectors.toList());
+
+    if (classificationFqns.isEmpty()) {
+      return;
+    }
+
+    // Batch fetch all tags in ONE query
+    List<Tag> tags = getTags(classificationFqns);
+    Map<String, Tag> tagMap =
+        tags.stream()
+            .collect(Collectors.toMap(Tag::getFullyQualifiedName, tag -> tag, (a, b) -> a));
+
+    // Check disabled status
     for (TagLabel tagLabel : listOrEmpty(tagLabels)) {
       if (tagLabel.getSource().equals(TagSource.CLASSIFICATION)) {
-        Tag tag = Entity.getCollectionDAO().tagDAO().findEntityByName(tagLabel.getTagFQN());
-        if (tag.getDisabled()) {
+        Tag tag = tagMap.get(tagLabel.getTagFQN());
+        if (tag != null && tag.getDisabled()) {
           throw new IllegalArgumentException(CatalogExceptionMessage.disabledTag(tagLabel));
         }
       }

@@ -14,6 +14,7 @@
 import { Typography } from 'antd';
 import { AxiosError } from 'axios';
 import { get, isEmpty, isNil, isString, isUndefined, lowerCase } from 'lodash';
+import { Bucket } from 'Models';
 import Qs from 'qs';
 import React from 'react';
 import {
@@ -36,11 +37,7 @@ import { EntityFields } from '../enums/AdvancedSearch.enum';
 import { SORT_ORDER } from '../enums/common.enum';
 import { EntityType } from '../enums/entity.enum';
 import { SearchIndex } from '../enums/search.enum';
-import {
-  Aggregations,
-  Bucket,
-  SearchResponse,
-} from '../interface/search.interface';
+import { Aggregations, SearchResponse } from '../interface/search.interface';
 import {
   EsBoolQuery,
   QueryFieldInterface,
@@ -364,11 +361,27 @@ export const getAggregationOptions = async (
   value: string,
   filter: string,
   isIndependent: boolean,
-  deleted = false
+  deleted = false,
+  size = 10,
+  isNLPEnabled = false
 ) => {
   return isIndependent
-    ? postAggregateFieldOptions(index, key, value, filter)
-    : getAggregateFieldOptions(index, key, value, filter, undefined, deleted);
+    ? postAggregateFieldOptions({
+        index: Array.isArray(index) ? index.join(',') : index,
+        fieldName: key,
+        fieldValue: value,
+        query: filter,
+        size,
+      })
+    : getAggregateFieldOptions(
+        index,
+        key,
+        value,
+        filter,
+        undefined,
+        deleted,
+        isNLPEnabled
+      );
 };
 
 export const updateTreeDataWithCounts = (

@@ -137,3 +137,4 @@ CREATE INDEX idx_entity_relationship_bidirectional
 ON entity_relationship(fromId, toId, relation, deleted);
 
 
+

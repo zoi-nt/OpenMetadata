@@ -11,15 +11,20 @@
  *  limitations under the License.
  */
 
-import { Divider, Link } from '@mui/material';
-import { Avatar, Card, Col, Row, Tabs, Typography } from 'antd';
+import { Card, Col, Row, Tabs, Typography } from 'antd';
 import { AxiosError } from 'axios';
+import classNames from 'classnames';
 import { startCase } from 'lodash';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Link } from 'react-router-dom';
 import { ReactComponent as AddPlaceHolderIcon } from '../../../../assets/svg/ic-no-records.svg';
 import { PROFILER_FILTER_RANGE } from '../../../../constants/profiler.constant';
-import { ERROR_PLACEHOLDER_TYPE } from '../../../../enums/common.enum';
+import {
+  ERROR_PLACEHOLDER_TYPE,
+  SORT_ORDER,
+} from '../../../../enums/common.enum';
+import { TestCaseType } from '../../../../enums/TestSuite.enum';
 import { TestCase, TestCaseStatus } from '../../../../generated/tests/testCase';
 import {
   TestCaseResolutionStatus,
@@ -27,11 +32,16 @@ import {
 } from '../../../../generated/tests/testCaseResolutionStatus';
 import { Include } from '../../../../generated/type/include';
 import { getListTestCaseIncidentStatus } from '../../../../rest/incidentManagerAPI';
-import { listTestCases } from '../../../../rest/testAPI';
+import { getListTestCaseBySearch } from '../../../../rest/testAPI';
+import {
+  getTableFQNFromColumnFQN,
+  Transi18next,
+} from '../../../../utils/CommonUtils';
 import {
   getCurrentMillis,
   getEpochMillisForPastDays,
 } from '../../../../utils/date-time/DateTimeUtils';
+import { getColumnNameFromEntityLink } from '../../../../utils/EntityUtils';
 import { getTestCaseDetailPagePath } from '../../../../utils/RouterUtils';
 import { generateEntityLink } from '../../../../utils/TableUtils';
 import { showErrorToast } from '../../../../utils/ToastUtils';
@@ -39,49 +49,43 @@ import DataQualitySection from '../../../common/DataQualitySection';
 import ErrorPlaceHolderNew from '../../../common/ErrorWithPlaceholder/ErrorPlaceHolderNew';
 import Loader from '../../../common/Loader/Loader';
 import '../../../common/OverviewSection/OverviewSection.less';
+import { OwnerLabel } from '../../../common/OwnerLabel/OwnerLabel.component';
 import SearchBarComponent from '../../../common/SearchBarComponent/SearchBar.component';
 import { StatusType } from '../../../common/StatusBadge/StatusBadge.interface';
 import StatusBadgeV2 from '../../../common/StatusBadge/StatusBadgeV2.component';
 import Severity from '../../../DataQuality/IncidentManager/Severity/Severity.component';
+import {
+  DataQualityTabProps,
+  DetailItemProps,
+  FilterStatus,
+  IncidentFilterStatus,
+  IncidentStatusCounts,
+  TestCaseCardProps,
+  TestCaseStatusCounts,
+} from './DataQualityTab.interface';
 import './DataQualityTab.less';
 
-interface DataQualityTabProps {
-  entityFQN: string;
-  entityType: string;
-}
-
-interface TestCaseStatusCounts {
-  success: number;
-  failed: number;
-  aborted: number;
-  ack: number;
-  total: number;
-}
-
-interface IncidentStatusCounts {
-  new: number;
-  assigned: number;
-  resolved: number;
-  ack: number;
-  total: number;
-}
-
-type FilterStatus = 'success' | 'failed' | 'aborted';
-type IncidentFilterStatus = 'new' | 'ack' | 'assigned' | 'resolved';
-
-interface TestCaseCardProps {
-  testCase: TestCase;
-  incident?: TestCaseResolutionStatus;
-}
+const DetailItem: React.FC<DetailItemProps> = ({
+  label,
+  value,
+  showDottedBorder = false,
+}) => (
+  <div
+    className={`test-case-detail-item ${showDottedBorder ? 'dotted-row' : ''}`}>
+    <Typography.Text className="detail-label">{label}</Typography.Text>
+    <div className="detail-value">{value}</div>
+  </div>
+);
 
 const TestCaseCard: React.FC<TestCaseCardProps> = ({ testCase, incident }) => {
   const { t } = useTranslation();
 
   const getColumnName = (entityLink: string) => {
-    if (entityLink.includes('::columns::')) {
-      const parts = entityLink.split('::columns::');
+    const isColumn = entityLink.includes('::columns::');
+    if (isColumn) {
+      const name = getColumnNameFromEntityLink(entityLink ?? '');
 
-      return parts.at(-1);
+      return name;
     }
 
     return null;
@@ -117,28 +121,6 @@ const TestCaseCard: React.FC<TestCaseCardProps> = ({ testCase, incident }) => {
     return lowerStatus as StatusType;
   };
 
-  const renderAssigneeInfo = () => {
-    const assignee = incident?.testCaseResolutionStatusDetails?.assignee;
-    if (!assignee) {
-      return <Typography.Text className="detail-value">--</Typography.Text>;
-    }
-
-    const avatarText =
-      assignee.displayName?.charAt(0) || assignee.name?.charAt(0) || 'U';
-    const displayName = assignee.displayName || assignee.name || 'Unknown';
-
-    return (
-      <>
-        <Avatar className="assignee-avatar" size={18}>
-          {avatarText}
-        </Avatar>
-        <Typography.Text className="assignee-name">
-          {displayName}
-        </Typography.Text>
-      </>
-    );
-  };
-
   // If incident is provided, use incident data; otherwise use test case data
   const isIncidentMode = !!incident;
 
@@ -158,6 +140,79 @@ const TestCaseCard: React.FC<TestCaseCardProps> = ({ testCase, incident }) => {
     ? getStatusBadgeType(status as TestCaseResolutionStatusTypes)
     : getTestCaseStatusType(status as string);
 
+  // Build detail items array for cleaner rendering
+  const detailItems = useMemo(() => {
+    if (isIncidentMode) {
+      // Incident mode: show severity and assignee
+      const assignee = incident?.testCaseResolutionStatusDetails?.assignee;
+
+      return [
+        ...(severity
+          ? [
+              {
+                label: t('label.severity'),
+                value: <Severity hasPermission={false} severity={severity} />,
+                showDottedBorder: true, // Always show border before assignee
+              },
+            ]
+          : []),
+        {
+          label: t('label.assignee'),
+          value: (
+            <div className="assignee-info">
+              <OwnerLabel
+                owners={assignee ? [assignee] : []}
+                placeHolder={t('label.no-entity', {
+                  entity: t('label.assignee'),
+                })}
+              />
+            </div>
+          ),
+          showDottedBorder: false, // Last item, no border
+        },
+      ];
+    }
+
+    // Test case mode: show test type and column name if applicable
+    return [
+      ...(columnName
+        ? [
+            {
+              label: t('label.test-type'),
+              value: t('label.column'),
+              showDottedBorder: true, // Always show border before column name
+            },
+            {
+              label: t('label.column-name'),
+              value: columnName,
+              showDottedBorder: !!testCase.incidentId, // Show border only if incident follows
+            },
+          ]
+        : [
+            {
+              label: t('label.test-type'),
+              value: t('label.table'),
+              showDottedBorder: !!testCase.incidentId, // Show border only if incident follows
+            },
+          ]),
+      ...(testCase.incidentId
+        ? [
+            {
+              label: t('label.incident'),
+              value: (
+                <StatusBadgeV2
+                  label="Assigned"
+                  showIcon={false}
+                  status={StatusType.Warning}
+                />
+              ),
+              showDottedBorder: false, // Last item, no border
+            },
+          ]
+        : []),
+    ];
+  }, [isIncidentMode, columnName, testCase.incidentId, severity, incident, t]);
+
   return (
     <Card
       bordered={false}
@@ -169,10 +224,7 @@ const TestCaseCard: React.FC<TestCaseCardProps> = ({ testCase, incident }) => {
             <Link
               className="test-case-name"
               data-testid={`test-case-${testCaseName}`}
-              href={getTestCaseDetailPagePath(
-                testCase.fullyQualifiedName ?? ''
-              )}
-              target="_blank">
+              to={getTestCaseDetailPagePath(testCase.fullyQualifiedName ?? '')}>
               {testCaseName}
             </Link>
           </div>
@@ -187,55 +239,25 @@ const TestCaseCard: React.FC<TestCaseCardProps> = ({ testCase, incident }) => {
 
         {/* Details Section */}
         <div className="test-case-details">
-          {!isIncidentMode && columnName && (
-            <div className="test-case-detail-item dotted-row">
-              <Typography.Text className="detail-label">
-                {t('label.column')}
-              </Typography.Text>
-              <Typography.Text className="detail-value">
-                {columnName}
-              </Typography.Text>
-            </div>
-          )}
-
-          {isIncidentMode && severity && (
-            <div className="test-case-detail-item dotted-row">
-              <Typography.Text className="detail-label">
-                {t('label.severity')}
-              </Typography.Text>
-              <div className="detail-value">
-                <Severity hasPermission={false} severity={severity} />
-              </div>
-            </div>
-          )}
-
-          <div className="test-case-detail-item">
-            <Typography.Text className="detail-label">
-              {isIncidentMode ? t('label.assignee') : t('label.incident')}
-            </Typography.Text>
-            {isIncidentMode ? (
-              <div className="assignee-info">{renderAssigneeInfo()}</div>
-            ) : (
-              <Typography.Text className="detail-value">
-                {testCase.incidentId ? (
-                  <StatusBadgeV2
-                    label="Assigned"
-                    showIcon={false}
-                    status={StatusType.Warning}
-                  />
-                ) : (
-                  '--'
-                )}
-              </Typography.Text>
-            )}
-          </div>
+          {detailItems.map((item, index) => (
+            <DetailItem
+              key={`${item.label}-${index}`}
+              label={item.label}
+              showDottedBorder={item.showDottedBorder}
+              value={item.value}
+            />
+          ))}
         </div>
       </div>
     </Card>
   );
 };
 
-const DataQualityTab: React.FC<DataQualityTabProps> = ({ entityFQN }) => {
+const DataQualityTab: React.FC<DataQualityTabProps> = ({
+  entityFQN,
+  isColumnDetailPanel = false,
+  hasViewTests = true,
+}) => {
   const { t } = useTranslation();
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [testCases, setTestCases] = useState<TestCase[]>([]);
@@ -263,7 +285,7 @@ const DataQualityTab: React.FC<DataQualityTabProps> = ({ entityFQN }) => {
     useState<IncidentFilterStatus>('new');
   const [isIncidentsLoading, setIsIncidentsLoading] = useState<boolean>(false);
 
-  const fetchTestCases = async () => {
+  const fetchTestCases = async (searchQuery: string = '') => {
     if (!entityFQN) {
       setIsLoading(false);
 
@@ -274,161 +296,215 @@ const DataQualityTab: React.FC<DataQualityTabProps> = ({ entityFQN }) => {
       setIsLoading(true);
       const entityLink = generateEntityLink(entityFQN);
 
-      const response = await listTestCases({
+      const response = await getListTestCaseBySearch({
         entityLink,
+        q: searchQuery || undefined,
         includeAllTests: true,
-        limit: 100, // Get more test cases to ensure accurate counts
-        fields: ['testCaseResult', 'incidentId'],
+        limit: 50,
+        fields: 'testCaseResult,incidentId',
+        include: Include.NonDeleted,
+        sortType: SORT_ORDER.DESC,
+        sortField: 'testCaseResult.timestamp',
+        testCaseType: TestCaseType.all,
       });
 
       setTestCases(response.data || []);
 
-      // Calculate status counts
-      const counts = (response.data || []).reduce(
-        (acc, testCase) => {
-          const status = testCase.testCaseResult?.testCaseStatus;
-          if (status) {
-            switch (status) {
-              case TestCaseStatus.Success:
-                acc.success++;
+      if (!searchQuery) {
+        // Calculate status counts only when there is no search query
+        const counts = (response.data || []).reduce(
+          (acc, testCase) => {
+            const status = testCase.testCaseResult?.testCaseStatus;
+            if (status) {
+              switch (status) {
+                case TestCaseStatus.Success:
+                  acc.success++;
 
-                break;
-              case TestCaseStatus.Failed:
-                acc.failed++;
+                  break;
+                case TestCaseStatus.Failed:
+                  acc.failed++;
 
-                break;
-              case TestCaseStatus.Aborted:
-                acc.aborted++;
+                  break;
+                case TestCaseStatus.Aborted:
+                  acc.aborted++;
 
-                break;
+                  break;
+              }
+              acc.total++;
             }
-            acc.total++;
-          }
 
-          return acc;
-        },
-        { success: 0, failed: 0, aborted: 0, ack: 0, total: 0 }
-      );
+            return acc;
+          },
+          { success: 0, failed: 0, aborted: 0, ack: 0, total: 0 }
+        );
 
-      setStatusCounts(counts);
+        setStatusCounts(counts);
+      }
     } catch (error) {
       showErrorToast(error as AxiosError);
       setTestCases([]);
-      setStatusCounts({ success: 0, failed: 0, aborted: 0, ack: 0, total: 0 });
+      if (!searchQuery) {
+        setStatusCounts({
+          success: 0,
+          failed: 0,
+          aborted: 0,
+          ack: 0,
+          total: 0,
+        });
+      }
     } finally {
       setIsLoading(false);
     }
   };
 
-  const fetchIncidents = async () => {
-    if (!entityFQN) {
-      setIsIncidentsLoading(false);
+  const fetchIncidents = useCallback(
+    async (currentTestCases?: TestCase[]) => {
+      if (!entityFQN) {
+        setIsIncidentsLoading(false);
 
-      return;
-    }
+        return;
+      }
 
-    try {
-      setIsIncidentsLoading(true);
+      try {
+        setIsIncidentsLoading(true);
 
-      const startTs = getEpochMillisForPastDays(
-        PROFILER_FILTER_RANGE.last30days.days
-      );
-      const endTs = getCurrentMillis();
+        const startTs = getEpochMillisForPastDays(
+          PROFILER_FILTER_RANGE.last30days.days
+        );
+        const endTs = getCurrentMillis();
 
-      const response = await getListTestCaseIncidentStatus({
-        latest: true,
-        include: Include.NonDeleted,
-        originEntityFQN: entityFQN,
-        startTs,
-        endTs,
-        limit: 100,
-      });
+        const originFQN = isColumnDetailPanel
+          ? getTableFQNFromColumnFQN(entityFQN)
+          : entityFQN;
 
-      setIncidents(response.data || []);
+        const response = await getListTestCaseIncidentStatus({
+          latest: true,
+          include: Include.NonDeleted,
+          originEntityFQN: originFQN,
+          startTs,
+          endTs,
+          limit: 100,
+        });
 
-      // Calculate incident status counts
-      const counts = (response.data || []).reduce(
-        (acc, incident) => {
-          const status = incident.testCaseResolutionStatusType;
+        let allIncidents = response.data || [];
 
-          if (status) {
-            switch (status) {
-              case TestCaseResolutionStatusTypes.New:
-                acc.new++;
+        if (
+          isColumnDetailPanel &&
+          currentTestCases &&
+          currentTestCases.length > 0
+        ) {
+          const testCaseFQNSet = new Set(
+            currentTestCases.map((testCase) => testCase.fullyQualifiedName)
+          );
+          allIncidents = allIncidents.filter(
+            (incident) =>
+              incident.testCaseReference?.fullyQualifiedName &&
+              testCaseFQNSet.has(incident.testCaseReference.fullyQualifiedName)
+          );
+        }
 
-                break;
-              case TestCaseResolutionStatusTypes.Assigned:
-                acc.assigned++;
+        setIncidents(allIncidents);
 
-                break;
-              case TestCaseResolutionStatusTypes.Resolved:
-                acc.resolved++;
+        // Calculate incident status counts
+        const counts = allIncidents.reduce(
+          (acc, incident) => {
+            const status = incident.testCaseResolutionStatusType;
 
-                break;
-              case TestCaseResolutionStatusTypes.ACK:
-                acc.ack++;
+            if (status) {
+              switch (status) {
+                case TestCaseResolutionStatusTypes.New:
+                  acc.new++;
 
-                break;
+                  break;
+                case TestCaseResolutionStatusTypes.Assigned:
+                  acc.assigned++;
+
+                  break;
+                case TestCaseResolutionStatusTypes.Resolved:
+                  acc.resolved++;
+
+                  break;
+                case TestCaseResolutionStatusTypes.ACK:
+                  acc.ack++;
+
+                  break;
+              }
+              acc.total++;
             }
-            acc.total++;
-          }
 
-          return acc;
-        },
-        {
+            return acc;
+          },
+          {
+            new: 0,
+            assigned: 0,
+            resolved: 0,
+            ack: 0,
+            total: 0,
+          }
+        );
+
+        setIncidentCounts(counts);
+      } catch (error) {
+        showErrorToast(error as AxiosError);
+        setIncidents([]);
+        setIncidentCounts({
           new: 0,
           assigned: 0,
           resolved: 0,
           ack: 0,
           total: 0,
-        }
-      );
-
-      setIncidentCounts(counts);
-    } catch (error) {
-      showErrorToast(error as AxiosError);
-      setIncidents([]);
-      setIncidentCounts({
-        new: 0,
-        assigned: 0,
-        resolved: 0,
-        ack: 0,
-        total: 0,
-      });
-    } finally {
-      setIsIncidentsLoading(false);
-    }
-  };
+        });
+      } finally {
+        setIsIncidentsLoading(false);
+      }
+    },
+    [entityFQN, isColumnDetailPanel]
+  );
 
   useEffect(() => {
-    fetchTestCases();
-    fetchIncidents();
+    if (!hasViewTests) {
+      setIsLoading(false);
+
+      return;
+    }
+    fetchTestCases(searchText);
+  }, [entityFQN, hasViewTests, searchText]);
+
+  useEffect(() => {
+    if (!hasViewTests) {
+      return;
+    }
+    if (!isColumnDetailPanel) {
+      fetchIncidents();
+    }
+  }, [entityFQN, hasViewTests, fetchIncidents, isColumnDetailPanel]);
+
+  const hasFetchedColumnIncidents = useRef(false);
+
+  useEffect(() => {
+    hasFetchedColumnIncidents.current = false;
   }, [entityFQN]);
 
-  // Filter test cases based on active filter and search text
+  useEffect(() => {
+    if (
+      isColumnDetailPanel &&
+      testCases.length > 0 &&
+      hasViewTests &&
+      !hasFetchedColumnIncidents.current
+    ) {
+      hasFetchedColumnIncidents.current = true;
+      fetchIncidents(testCases);
+    }
+  }, [fetchIncidents, isColumnDetailPanel, testCases, hasViewTests]);
+
+  // Filter test cases based on active filter (search text is handled server-side)
   const filteredTestCases = useMemo(() => {
     return testCases.filter((testCase) => {
       const status = testCase.testCaseResult?.testCaseStatus;
-      const matchesStatus = status?.toLowerCase() === activeFilter;
 
-      if (!searchText) {
-        return matchesStatus;
-      }
-
-      const searchLower = searchText.toLowerCase();
-      const testCaseName = testCase.name?.toLowerCase() || '';
-      const testCaseDisplayName =
-        testCase.displayName?.toLowerCase() ||
-        testCase.fullyQualifiedName?.toLowerCase() ||
-        '';
-
-      return (
-        matchesStatus &&
-        (testCaseName.includes(searchLower) ||
-          testCaseDisplayName.includes(searchLower))
-      );
+      return status?.toLowerCase() === activeFilter;
     });
-  }, [testCases, activeFilter, searchText]);
+  }, [testCases, activeFilter]);
 
   // Filter incidents based on active incident filter and search text
   const filteredIncidents = useMemo(() => {
@@ -494,6 +570,11 @@ const DataQualityTab: React.FC<DataQualityTabProps> = ({ entityFQN }) => {
   const convertIncidentToTestCase = (
     incident: TestCaseResolutionStatus
   ): TestCase => {
+    const matchingTestCase = testCases.find(
+      (tc) =>
+        tc.fullyQualifiedName === incident.testCaseReference?.fullyQualifiedName
+    );
+
     return {
       id: incident.id || '',
       name:
@@ -501,13 +582,41 @@ const DataQualityTab: React.FC<DataQualityTabProps> = ({ entityFQN }) => {
         incident.testCaseReference?.name ||
         'Unknown Test Case',
       fullyQualifiedName: incident.testCaseReference?.fullyQualifiedName || '',
-      entityLink: incident.testCaseReference?.fullyQualifiedName || '',
+      entityLink: matchingTestCase?.entityLink || '',
       testCaseResult: {
         testCaseStatus: incident.testCaseResolutionStatusType as string,
         timestamp: incident.timestamp || Date.now(),
       },
       incidentId: incident.id,
     } as TestCase;
+  };
+
+  const renderTestCaseCards = () => {
+    if (isLoading) {
+      return <Loader />;
+    }
+
+    if (filteredTestCases.length > 0) {
+      return (
+        <Row gutter={[0, 12]} style={{ marginLeft: '-16px' }}>
+          {filteredTestCases.map((testCase) => (
+            <Col key={testCase.id} span={24}>
+              <TestCaseCard testCase={testCase} />
+            </Col>
+          ))}
+        </Row>
+      );
+    }
+
+    return (
+      <div className="no-test-cases">
+        <Typography.Text className="no-data-placeholder">
+          {t('label.no-entity', {
+            entity: t('label.test-case-plural'),
+          })}
+        </Typography.Text>
+      </div>
+    );
   };
 
   const renderIncidentCards = () => {
@@ -548,6 +657,166 @@ const DataQualityTab: React.FC<DataQualityTabProps> = ({ entityFQN }) => {
     );
   };
 
+  const renderDataQualityTabContent = () => {
+    if (isLoading && statusCounts.total === 0) {
+      return (
+        <div className="flex-center p-lg">
+          <Loader size="default" />
+        </div>
+      );
+    }
+
+    if (statusCounts.total === 0) {
+      return (
+        <ErrorPlaceHolderNew
+          className="text-grey-14 m-t-lg"
+          icon={<AddPlaceHolderIcon height={100} width={100} />}
+          type={ERROR_PLACEHOLDER_TYPE.CUSTOM}>
+          <Typography.Paragraph className="text-center p-x-md  no-data-placeholder">
+            {t('message.no-data-quality-test-message')}
+          </Typography.Paragraph>
+        </ErrorPlaceHolderNew>
+      );
+    }
+
+    return (
+      <div className="data-quality-tab-content">
+        <DataQualitySection
+          isDataQualityTab
+          activeFilter={activeFilter}
+          tests={[
+            { type: 'success', count: statusCounts.success },
+            { type: 'aborted', count: statusCounts.aborted },
+            { type: 'failed', count: statusCounts.failed },
+          ]}
+          totalTests={statusCounts.total}
+          onEdit={() => {
+            // Handle edit functionality
+          }}
+          onFilterChange={handleFilterChange}
+        />
+        <div className="test-case-cards-section">
+          <div className="p-b-md p-r-md">
+            <SearchBarComponent
+              containerClassName="searchbar-container"
+              placeholder={t('label.search-for-type', {
+                type: t('label.test-case-plural'),
+              })}
+              searchValue={searchText}
+              typingInterval={350}
+              onSearch={setSearchText}
+            />
+          </div>
+          {renderTestCaseCards()}
+        </div>
+      </div>
+    );
+  };
+
+  const renderIncidentsTabContent = () => {
+    if (isIncidentsLoading) {
+      return (
+        <div className="flex-center p-lg">
+          <Loader size="default" />
+        </div>
+      );
+    }
+
+    if (incidentCounts.total === 0) {
+      return (
+        <div className="m-t-lg">
+          <ErrorPlaceHolderNew
+            className="text-grey-14"
+            icon={<AddPlaceHolderIcon height={100} width={100} />}
+            type={ERROR_PLACEHOLDER_TYPE.CUSTOM}>
+            <Typography.Paragraph className="text-center p-x-md  no-data-placeholder">
+              {t('message.no-data-quality-test-message')}
+            </Typography.Paragraph>
+          </ErrorPlaceHolderNew>
+        </div>
+      );
+    }
+
+    return (
+      <div className="incidents-tab-content">
+        <div className="incidents-stats-container">
+          <div className="incidents-stats-cards-container">
+            <button
+              className={`incident-stat-card new-card ${
+                activeIncidentFilter === 'new' ? 'active' : ''
+              }`}
+              type="button"
+              onClick={() => handleIncidentFilterChange('new')}>
+              <Typography.Text className="stat-count new">
+                {incidentCounts.new}
+              </Typography.Text>
+              <Typography.Text className="stat-label new">
+                {t('label.new')}
+              </Typography.Text>
+            </button>
+            <div aria-hidden="true" className="stat-card-vertical-divider" />
+            <button
+              className={`incident-stat-card ack-card ${
+                activeIncidentFilter === 'ack' ? 'active' : ''
+              }`}
+              type="button"
+              onClick={() => handleIncidentFilterChange('ack')}>
+              <Typography.Text className="stat-count ack">
+                {incidentCounts.ack}
+              </Typography.Text>
+              <Typography.Text className="stat-label ack">
+                {t('label.acknowledged')}
+              </Typography.Text>
+            </button>
+            <div aria-hidden="true" className="stat-card-vertical-divider" />
+            <button
+              className={`incident-stat-card assigned-card ${
+                activeIncidentFilter === 'assigned' ? 'active' : ''
+              }`}
+              type="button"
+              onClick={() => handleIncidentFilterChange('assigned')}>
+              <Typography.Text className="stat-count assigned">
+                {incidentCounts.assigned}
+              </Typography.Text>
+              <Typography.Text className="stat-label assigned">
+                {t('label.assigned')}
+              </Typography.Text>
+            </button>
+          </div>
+          <div>
+            <button
+              className={classNames('resolved-section', {
+                active: activeIncidentFilter === 'resolved',
+              })}
+              type="button"
+              onClick={() => handleIncidentFilterChange('resolved')}>
+              <Typography.Text className="resolved-label">
+                {t('label.-with-colon', { text: t('label.resolved') })}
+              </Typography.Text>
+              <Typography.Text className="resolved-value">
+                {incidentCounts.resolved}
+              </Typography.Text>
+            </button>
+          </div>
+        </div>
+        <div className="test-cases-section">
+          <div className="p-b-md">
+            <SearchBarComponent
+              containerClassName="searchbar-container"
+              placeholder={t('label.search-for-type', {
+                type: t('label.incident-plural'),
+              })}
+              searchValue={searchText}
+              typingInterval={350}
+              onSearch={setSearchText}
+            />
+          </div>
+          <div className="incident-cards-section">{renderIncidentCards()}</div>
+        </div>
+      </div>
+    );
+  };
+
   // Tab items configuration
   const tabItems = [
     {
@@ -566,67 +835,7 @@ const DataQualityTab: React.FC<DataQualityTabProps> = ({ entityFQN }) => {
           </span>
         </span>
       ),
-      children:
-        statusCounts.total === 0 ? (
-          <ErrorPlaceHolderNew
-            className="text-grey-14 m-t-lg"
-            icon={<AddPlaceHolderIcon height={100} width={100} />}
-            type={ERROR_PLACEHOLDER_TYPE.CUSTOM}>
-            <Typography.Paragraph className="text-center p-x-md  no-data-placeholder">
-              {t('message.no-data-quality-test-message')}
-            </Typography.Paragraph>
-          </ErrorPlaceHolderNew>
-        ) : (
-          <div className="data-quality-tab-content">
-            <DataQualitySection
-              isDataQualityTab
-              activeFilter={activeFilter}
-              tests={[
-                { type: 'success', count: statusCounts.success },
-                { type: 'aborted', count: statusCounts.aborted },
-                { type: 'failed', count: statusCounts.failed },
-              ]}
-              totalTests={statusCounts.total}
-              onEdit={() => {
-                // Handle edit functionality
-              }}
-              onFilterChange={(filter) => {
-                handleFilterChange(filter);
-              }}
-            />
-
-            <div className="test-case-cards-section">
-              <div className="p-b-md p-r-md">
-                <SearchBarComponent
-                  containerClassName="searchbar-container"
-                  placeholder={t('label.search-for-type', {
-                    type: t('label.test-case-plural'),
-                  })}
-                  searchValue={searchText}
-                  typingInterval={350}
-                  onSearch={setSearchText}
-                />
-              </div>
-              {filteredTestCases.length > 0 ? (
-                <Row gutter={[0, 12]} style={{ marginLeft: '-16px' }}>
-                  {filteredTestCases.map((testCase) => (
-                    <Col key={testCase.id} span={24}>
-                      <TestCaseCard testCase={testCase} />
-                    </Col>
-                  ))}
-                </Row>
-              ) : (
-                <div className="no-test-cases">
-                  <Typography.Text className="no-data-placeholder">
-                    {t('label.no-entity', {
-                      entity: t('label.test-case-plural'),
-                    })}
-                  </Typography.Text>
-                </div>
-              )}
-            </div>
-          </div>
-        ),
+      children: renderDataQualityTabContent(),
     },
     {
       key: 'incidents',
@@ -645,119 +854,26 @@ const DataQualityTab: React.FC<DataQualityTabProps> = ({ entityFQN }) => {
           </span>
         </span>
       ),
-      children:
-        incidentCounts.total === 0 ? (
-          <div className="m-t-lg">
-            <ErrorPlaceHolderNew
-              className="text-grey-14"
-              icon={<AddPlaceHolderIcon height={100} width={100} />}
-              type={ERROR_PLACEHOLDER_TYPE.CUSTOM}>
-              <Typography.Paragraph className="text-center p-x-md  no-data-placeholder">
-                {t('message.no-data-quality-test-message')}
-              </Typography.Paragraph>
-            </ErrorPlaceHolderNew>
-          </div>
-        ) : (
-          <div className="incidents-tab-content">
-            {/* Incidents Stats Cards */}
-            <div className="incidents-stats-container">
-              <div className="incidents-stats-cards-container">
-                <button
-                  className={`incident-stat-card new-card ${
-                    activeIncidentFilter === 'new' ? 'active' : ''
-                  }`}
-                  type="button"
-                  onClick={() => handleIncidentFilterChange('new')}>
-                  <Typography.Text className="stat-count new">
-                    {incidentCounts.new.toString().padStart(2, '0')}
-                  </Typography.Text>
-                  <Typography.Text className="stat-label new">
-                    {t('label.new')}
-                  </Typography.Text>
-                </button>
-                <Divider
-                  flexItem
-                  className="stat-card-vertical-divider"
-                  orientation="vertical"
-                  variant="middle"
-                />
-                <button
-                  className={`incident-stat-card ack-card ${
-                    activeIncidentFilter === 'ack' ? 'active' : ''
-                  }`}
-                  type="button"
-                  onClick={() => handleIncidentFilterChange('ack')}>
-                  <Typography.Text className="stat-count ack">
-                    {incidentCounts.ack.toString().padStart(2, '0')}
-                  </Typography.Text>
-                  <Typography.Text className="stat-label ack">
-                    {t('label.acknowledged')}
-                  </Typography.Text>
-                </button>
-                <Divider
-                  flexItem
-                  className="stat-card-vertical-divider"
-                  orientation="vertical"
-                  variant="middle"
-                />
-                <button
-                  className={`incident-stat-card assigned-card ${
-                    activeIncidentFilter === 'assigned' ? 'active' : ''
-                  }`}
-                  type="button"
-                  onClick={() => handleIncidentFilterChange('assigned')}>
-                  <Typography.Text className="stat-count assigned">
-                    {incidentCounts.assigned.toString().padStart(2, '0')}
-                  </Typography.Text>
-                  <Typography.Text className="stat-label assigned">
-                    {t('label.assigned')}
-                  </Typography.Text>
-                </button>
-              </div>
-              <div>
-                <button
-                  className="resolved-section"
-                  type="button"
-                  onClick={() => handleIncidentFilterChange('resolved')}>
-                  <Typography.Text className="resolved-label">
-                    {t('label.-with-colon', { text: t('label.resolved') })}
-                  </Typography.Text>
-                  <Typography.Text className="resolved-value">
-                    {incidentCounts.resolved.toString().padStart(2, '0')}
-                  </Typography.Text>
-                </button>
-              </div>
-            </div>
-
-            {/* Test Cases Section */}
-            <div className="test-cases-section">
-              <div className="p-b-md">
-                <SearchBarComponent
-                  containerClassName="searchbar-container"
-                  placeholder={t('label.search-for-type', {
-                    type: t('label.incident-plural'),
-                  })}
-                  searchValue={searchText}
-                  typingInterval={350}
-                  onSearch={setSearchText}
-                />
-              </div>
-              {/* Incident Cards */}
-              <div className="incident-cards-section">
-                {renderIncidentCards()}
-              </div>
-            </div>
-          </div>
-        ),
+      children: renderIncidentsTabContent(),
     },
   ];
 
-  if (isLoading) {
+  if (!hasViewTests) {
     return (
-      <div className="data-quality-tab-container p-md">
-        <div>
-          <Loader />
-        </div>
+      <div className="lineage-items-list">
+        <ErrorPlaceHolderNew
+          className="text-grey-14 permission-error-placeholder"
+          type={ERROR_PLACEHOLDER_TYPE.PERMISSION}>
+          <Transi18next
+            i18nKey="message.no-access-placeholder"
+            renderElement={<span />}
+            values={{
+              entity: t('label.view-entity', {
+                entity: t('label.data-quality'),
+              }),
+            }}
+          />
+        </ErrorPlaceHolderNew>
       </div>
     );
   }
@@ -766,7 +882,9 @@ const DataQualityTab: React.FC<DataQualityTabProps> = ({ entityFQN }) => {
     <div className="data-quality-tab-container">
       <Tabs
         activeKey={activeTab}
-        className="data-quality-tabs"
+        className={classNames('data-quality-tabs', {
+          'column-detail-data-quality-tabs': isColumnDetailPanel,
+        })}
         items={tabItems}
         onChange={handleTabChange}
       />

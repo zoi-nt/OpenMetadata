@@ -42,6 +42,9 @@ import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
 import org.openmetadata.schema.EntityInterface;
 import org.openmetadata.schema.api.data.RestoreEntity;
+import org.openmetadata.schema.api.tests.BundleSuiteBulkAddRequest;
+import org.openmetadata.schema.api.tests.BundleSuiteBulkAddRequestBulkAll;
+import org.openmetadata.schema.api.tests.BundleSuiteBulkAddRequestBulkByIds;
 import org.openmetadata.schema.api.tests.CreateLogicalTestCases;
 import org.openmetadata.schema.api.tests.CreateTestCase;
 import org.openmetadata.schema.entity.teams.User;
@@ -54,8 +57,10 @@ import org.openmetadata.schema.type.Include;
 import org.openmetadata.schema.type.MetadataOperation;
 import org.openmetadata.schema.type.TableData;
 import org.openmetadata.schema.type.csv.CsvImportResult;
+import org.openmetadata.schema.utils.JsonUtils;
 import org.openmetadata.schema.utils.ResultList;
 import org.openmetadata.service.Entity;
+import org.openmetadata.service.jdbi3.EntityRepository;
 import org.openmetadata.service.jdbi3.Filter;
 import org.openmetadata.service.jdbi3.ListFilter;
 import org.openmetadata.service.jdbi3.TestCaseRepository;
@@ -75,6 +80,7 @@ import org.openmetadata.service.security.policyevaluator.ResourceContext;
 import org.openmetadata.service.security.policyevaluator.ResourceContextInterface;
 import org.openmetadata.service.security.policyevaluator.TestCaseResourceContext;
 import org.openmetadata.service.util.EntityUtil.Fields;
+import org.openmetadata.service.util.EntityUtil.RelationIncludes;
 import org.openmetadata.service.util.FullyQualifiedName;
 import org.openmetadata.service.util.RestUtil;
 import org.openmetadata.service.util.RestUtil.DeleteResponse;
@@ -92,7 +98,7 @@ import org.openmetadata.service.util.RestUtil.PutResponse;
 @Consumes(MediaType.APPLICATION_JSON)
 @Collection(name = "TestCases")
 public class TestCaseResource extends EntityResource<TestCase, TestCaseRepository> {
-  public static final String COLLECTION_PATH = "/v1/dataQuality/testCases";
+  public static final String COLLECTION_PATH = "/v1/dataQuality/testCases/";
   private final TestCaseMapper mapper = new TestCaseMapper();
   private final TestCaseResultMapper testCaseResultMapper = new TestCaseResultMapper();
   static final String FIELDS =
@@ -176,6 +182,11 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
           @QueryParam("entityLink")
           String entityLink,
       @Parameter(
+              description = "Return list of tests by column names",
+              schema = @Schema(type = "string", example = "{columnName}"))
+          @QueryParam("columnName")
+          String columnName,
+      @Parameter(
               description = "Return list of tests by entity FQN",
               schema =
                   @Schema(
@@ -186,9 +197,9 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
           String entityFQN,
       @Parameter(
               description = "Returns list of tests filtered by the testSuite id",
-              schema = @Schema(type = "string"))
+              schema = @Schema(type = "uuid"))
           @QueryParam("testSuiteId")
-          String testSuiteId,
+          UUID testSuiteId,
       @Parameter(
               description = "Include all the tests at the entity level",
               schema = @Schema(type = "boolean"))
@@ -225,31 +236,46 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
           String createdBy) {
     ListFilter filter =
         new ListFilter(include)
-            .addQueryParam("testSuiteId", testSuiteId)
+            .addQueryParam("testSuiteId", !nullOrEmpty(testSuiteId) ? testSuiteId.toString() : null)
             .addQueryParam("includeAllTests", includeAllTests.toString())
             .addQueryParam("testCaseStatus", status)
             .addQueryParam("testCaseType", type)
             .addQueryParam("entityFQN", entityFQN)
-            .addQueryParam("createdBy", createdBy);
-    ResourceContextInterface resourceContext = getResourceContext(entityLink, filter);
+            .addQueryParam("createdBy", createdBy)
+            .addQueryParam("columnName", columnName);
+    List<AuthRequest> authRequests = new ArrayList<>();
+    ResourceContextInterface testCaseRC = TestCaseResourceContext.builder().build();
+    OperationContext testCaseOperationContext =
+        new OperationContext(Entity.TEST_CASE, MetadataOperation.VIEW_BASIC);
+    authRequests.add(new AuthRequest(testCaseOperationContext, testCaseRC));
 
-    // Override OperationContext to change the entity to table and operation from VIEW_ALL to
-    // VIEW_TESTS
-    OperationContext operationContext =
-        new OperationContext(Entity.TABLE, MetadataOperation.VIEW_TESTS);
+    if (!nullOrEmpty(entityLink)) {
+      ResourceContextInterface tableRC = getResourceContext(entityLink, filter);
+      OperationContext tableOperationContext =
+          new OperationContext(Entity.TABLE, MetadataOperation.VIEW_TESTS);
+      authRequests.add(new AuthRequest(tableOperationContext, tableRC));
+    }
+    if (!nullOrEmpty(entityFQN)) {
+      // Hardcode to TABLE entity since tests are only defined on tables and columns for now
+      // TODO: Make this dynamic when tests can be defined on other entity types
+      ResourceContextInterface entityRC =
+          TestCaseResourceContext.builder().entityFQN(entityFQN).entityType(Entity.TABLE).build();
+      OperationContext operationContext =
+          new OperationContext(Entity.TABLE, MetadataOperation.VIEW_TESTS);
+      authRequests.add(new AuthRequest(operationContext, entityRC));
+    }
+    if (!nullOrEmpty(testSuiteId)) {
+      ResourceContextInterface testSuiteRC =
+          TestCaseResourceContext.builder().testSuiteId(testSuiteId).build();
+      OperationContext operationContext =
+          new OperationContext(Entity.TEST_SUITE, MetadataOperation.VIEW_BASIC);
+      authRequests.add(new AuthRequest(operationContext, testSuiteRC));
+    }
     Fields fields = getFields(fieldsParam);
 
     ResultList<TestCase> tests =
         super.listInternal(
-            uriInfo,
-            securityContext,
-            fields,
-            filter,
-            limitParam,
-            before,
-            after,
-            operationContext,
-            resourceContext);
+            uriInfo, securityContext, fields, filter, limitParam, before, after, authRequests);
     return PIIMasker.getTestCases(tests, authorizer, securityContext);
   }
 
@@ -304,7 +330,7 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
               description = "Returns list of tests filtered by a testSuite id",
               schema = @Schema(type = "string"))
           @QueryParam("testSuiteId")
-          String testSuiteId,
+          UUID testSuiteId,
       @Parameter(
               description = "Include all the tests at the entity level",
               schema = @Schema(type = "boolean"))
@@ -422,18 +448,21 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
               description = "Filter test cases by entities followed by a user",
               schema = @Schema(type = "string"))
           @QueryParam("followedBy")
-          String followedBy)
+          String followedBy,
+      @Parameter(
+              description = "Return list of tests by column names",
+              schema = @Schema(type = "string", example = "{columnName}"))
+          @QueryParam("columnName")
+          String columnName)
       throws IOException {
-    // Validate parameters
     validateTimestamps(startTimestamp, endTimestamp);
 
-    // Build search filters
     SearchSortFilter searchSortFilter =
         new SearchSortFilter(sortField, sortType, sortNestedPath, sortNestedMode);
     SearchListFilter searchListFilter =
         buildSearchListFilter(
             include,
-            testSuiteId,
+            !nullOrEmpty(testSuiteId) ? testSuiteId.toString() : null,
             includeAllTests,
             status,
             type,
@@ -449,7 +478,8 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
             owner,
             followedBy,
             startTimestamp,
-            endTimestamp);
+            endTimestamp,
+            columnName);
 
     // Execute search
     return executeTestCaseSearch(
@@ -457,6 +487,7 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
         securityContext,
         fieldsParam,
         entityLink,
+        testSuiteId,
         searchListFilter,
         searchSortFilter,
         limit,
@@ -526,15 +557,23 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
               schema = @Schema(implementation = Include.class))
           @QueryParam("include")
           @DefaultValue("non-deleted")
-          Include include) {
-    // Override OperationContext to change the entity to table and operation from VIEW_ALL to
-    // VIEW_TESTS
+          Include include,
+      @Parameter(
+              description =
+                  "Per-relation include control. Format: field:value,field2:value2. "
+                      + "Example: owners:non-deleted,followers:all. "
+                      + "Valid values: all, deleted, non-deleted. "
+                      + "If not specified for a field, uses the entity's include value.",
+              schema = @Schema(type = "string", example = "owners:non-deleted,followers:all"))
+          @QueryParam("includeRelations")
+          String includeRelations) {
     Fields fields = getFields(fieldsParam);
     OperationContext operationContext =
         new OperationContext(Entity.TABLE, MetadataOperation.VIEW_TESTS);
     ResourceContextInterface resourceContext = TestCaseResourceContext.builder().id(id).build();
+    RelationIncludes relationIncludes = new RelationIncludes(include, includeRelations);
     return getInternal(
-        uriInfo, securityContext, id, fields, include, operationContext, resourceContext);
+        uriInfo, securityContext, id, fields, relationIncludes, operationContext, resourceContext);
   }
 
   @GET
@@ -571,15 +610,23 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
               schema = @Schema(implementation = Include.class))
           @QueryParam("include")
           @DefaultValue("non-deleted")
-          Include include) {
-    // Override OperationContext to change the entity to table and operation from VIEW_ALL to
-    // VIEW_TESTS
+          Include include,
+      @Parameter(
+              description =
+                  "Per-relation include control. Format: field:value,field2:value2. "
+                      + "Example: owners:non-deleted,followers:all. "
+                      + "Valid values: all, deleted, non-deleted. "
+                      + "If not specified for a field, uses the entity's include value.",
+              schema = @Schema(type = "string", example = "owners:non-deleted,followers:all"))
+          @QueryParam("includeRelations")
+          String includeRelations) {
     Fields fields = getFields(fieldsParam);
     OperationContext operationContext =
         new OperationContext(Entity.TABLE, MetadataOperation.VIEW_TESTS);
     ResourceContextInterface resourceContext = TestCaseResourceContext.builder().name(fqn).build();
+    RelationIncludes relationIncludes = new RelationIncludes(include, includeRelations);
     return getByNameInternal(
-        uriInfo, securityContext, fqn, fields, include, operationContext, resourceContext);
+        uriInfo, securityContext, fqn, fields, relationIncludes, operationContext, resourceContext);
   }
 
   @GET
@@ -708,7 +755,6 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
                   new AuthRequest(tableOpContext, tableResourceContext),
                   new AuthRequest(operationContext, resourceContext)),
               AuthorizationLogic.ANY);
-          //          authorizer.authorize(securityContext, operationContext, resourceContext);
         });
 
     limits.enforceBulkSizeLimit(entityType, createTestCases.size());
@@ -1005,7 +1051,8 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
         new OperationContext(entityType, MetadataOperation.EDIT_TESTS);
     authorizer.authorize(securityContext, operationContext, getResourceContextById(id));
     TestCase testCase = repository.find(id, Include.NON_DELETED);
-    repository.setFields(testCase, new Fields(Set.of("testCaseResult")));
+    repository.setFields(
+        testCase, new Fields(Set.of("testCaseResult")), RelationIncludes.fromInclude(ALL));
     if (testCase.getTestCaseResult() == null
         || !testCase.getTestCaseResult().getTestCaseStatus().equals(TestCaseStatus.Failed)) {
       throw new IllegalArgumentException("Failed rows can only be added to a failed test case.");
@@ -1098,7 +1145,7 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
   @PUT
   @Path("/logicalTestCases")
   @Operation(
-      operationId = "addTestCasesToLogicalTestSuite",
+      operationId = "addTestCasesToBundleTestSuite",
       summary = "Add test cases to a logical test suite",
       description = "Add test cases to a logical test suite.",
       responses = {
@@ -1125,22 +1172,7 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
             null,
             false);
 
-    OperationContext editTestsOpContext =
-        new OperationContext(Entity.TEST_SUITE, MetadataOperation.EDIT_TESTS);
-    ResourceContextInterface testSuiteRC =
-        TestCaseResourceContext.builder().entity(testSuite).build();
-
-    OperationContext editAllOpContext =
-        new OperationContext(Entity.TEST_SUITE, MetadataOperation.EDIT_ALL);
-
-    List<AuthRequest> requests =
-        List.of(
-            new AuthRequest(editTestsOpContext, testSuiteRC),
-            new AuthRequest(editAllOpContext, testSuiteRC));
-    authorizer.authorizeRequests(securityContext, requests, AuthorizationLogic.ANY);
-    if (Boolean.TRUE.equals(testSuite.getBasic())) {
-      throw new IllegalArgumentException("You are trying to add test cases to a basic test suite.");
-    }
+    validateTestSuiteOps(testSuite, securityContext);
     List<UUID> testCaseIds = createLogicalTestCases.getTestCaseIds();
 
     if (testCaseIds == null || testCaseIds.isEmpty()) {
@@ -1153,7 +1185,69 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
       throw new IllegalArgumentException(
           "You are trying to add one or more test cases that do not exist.");
     }
-    return repository.addTestCasesToLogicalTestSuite(testSuite, testCaseIds).toResponse();
+    return Response.fromResponse(
+            repository.addTestCasesToLogicalTestSuite(testSuite, testCaseIds).toResponse())
+        .header("Deprecation", "true")
+        .header(
+            "Sunset",
+            "This endpoint will be removed in version 2.0. "
+                + "Use PUT /api/v1/dataQuality/testCases/logicalTestCases/bulk instead.")
+        .build();
+  }
+
+  @PUT
+  @Path("/logicalTestCases/bulk")
+  @Operation(
+      operationId = "addManyTestCasesToBundleTestSuite",
+      summary = "Add test cases to a logical test suite",
+      description = "Add test cases to a logical test suite.",
+      responses = {
+        @ApiResponse(
+            responseCode = "200",
+            description = "Successfully added test cases to the logical test suite.",
+            content =
+                @Content(
+                    mediaType = "application/json",
+                    schema = @Schema(implementation = TestSuite.class)))
+      })
+  public Response addManyTestCasesToBundleTestSuite(
+      @Context UriInfo uriInfo,
+      @Context SecurityContext securityContext,
+      @Valid BundleSuiteBulkAddRequest bundleSuiteBulkAddRequest) {
+
+    TestSuite testSuite =
+        Entity.getEntity(
+            Entity.TEST_SUITE,
+            bundleSuiteBulkAddRequest.getTestSuiteId(),
+            "domains,owners",
+            null,
+            false);
+
+    validateTestSuiteOps(testSuite, securityContext);
+    BundleSuiteBulkAddRequest.Mode mode = bundleSuiteBulkAddRequest.getMode();
+    if (mode.equals(BundleSuiteBulkAddRequest.Mode.IDS)) {
+      BundleSuiteBulkAddRequestBulkByIds bulkByIds =
+          JsonUtils.convertValue(
+              bundleSuiteBulkAddRequest.getSelection(), BundleSuiteBulkAddRequestBulkByIds.class);
+      List<UUID> testCaseIds = bulkByIds.getIds();
+      if (testCaseIds == null || testCaseIds.isEmpty()) {
+        return new RestUtil.PutResponse<>(Response.Status.OK, testSuite, ENTITY_NO_CHANGE)
+            .toResponse();
+      }
+      int existingTestCaseCount = repository.getTestCaseCount(testCaseIds);
+      if (existingTestCaseCount != testCaseIds.size()) {
+        throw new IllegalArgumentException(
+            "You are trying to add one or more test cases that do not exist.");
+      }
+      return repository.addTestCasesToLogicalTestSuite(testSuite, testCaseIds).toResponse();
+    }
+
+    BundleSuiteBulkAddRequestBulkAll bulkAll =
+        JsonUtils.convertValue(
+            bundleSuiteBulkAddRequest.getSelection(), BundleSuiteBulkAddRequestBulkAll.class);
+    return repository
+        .addAllTestCasesToLogicalTestSuite(testSuite, getExcludedIdsFromSelection(bulkAll))
+        .toResponse();
   }
 
   @GET
@@ -1239,6 +1333,7 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
                     schema = @Schema(implementation = CsvImportResult.class)))
       })
   public CsvImportResult importCsv(
+      @Context UriInfo uriInfo,
       @Context SecurityContext securityContext,
       @Parameter(
               description = "Name parameter (currently not used, reserved for future use)",
@@ -1252,9 +1347,15 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
           @DefaultValue("true")
           @QueryParam("dryRun")
           boolean dryRun,
+      @Parameter(
+              description =
+                  "The entity type for which the TestCase are being added (e.g., 'testSuite' or 'table')",
+              schema = @Schema(type = "string"))
+          @QueryParam("targetEntityType")
+          String targetEntityType,
       String csv)
       throws IOException {
-    return importCsvInternal(securityContext, name, csv, dryRun, false);
+    return importCsvInternal(uriInfo, securityContext, name, csv, dryRun, false, targetEntityType);
   }
 
   @PUT
@@ -1277,6 +1378,7 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
                     schema = @Schema(implementation = Response.class)))
       })
   public Response importCsvAsync(
+      @Context UriInfo uriInfo,
       @Context SecurityContext securityContext,
       @Parameter(
               description = "Name parameter (currently not used, reserved for future use)",
@@ -1290,8 +1392,15 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
           @DefaultValue("true")
           @QueryParam("dryRun")
           boolean dryRun,
+      @Parameter(
+              description =
+                  "The entity type for which the TestCase are being added (e.g., 'testSuite' or 'table')",
+              schema = @Schema(type = "string"))
+          @QueryParam("targetEntityType")
+          String targetEntityType,
       String csv) {
-    return importCsvInternalAsync(securityContext, name, csv, dryRun, false);
+    return importCsvInternalAsync(
+        uriInfo, securityContext, name, csv, dryRun, false, targetEntityType);
   }
 
   protected static ResourceContextInterface getResourceContext(
@@ -1365,7 +1474,8 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
       String owner,
       String followedBy,
       Long startTimestamp,
-      Long endTimestamp) {
+      Long endTimestamp,
+      String columnName) {
 
     SearchListFilter searchListFilter = new SearchListFilter(include);
 
@@ -1384,6 +1494,7 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
     searchListFilter.addQueryParam("tier", tier);
     searchListFilter.addQueryParam("serviceName", serviceName);
     searchListFilter.addQueryParam("createdBy", createdBy);
+    searchListFilter.addQueryParam("columnName", columnName);
 
     // Handle owner and followedBy parameters
     if (!nullOrEmpty(owner)) {
@@ -1409,6 +1520,7 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
       SecurityContext securityContext,
       String fieldsParam,
       String entityLink,
+      UUID testSuiteId,
       SearchListFilter searchListFilter,
       SearchSortFilter searchSortFilter,
       int limit,
@@ -1416,14 +1528,25 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
       String q,
       String queryString)
       throws IOException {
+    List<AuthRequest> authRequests = new ArrayList<>();
+    ResourceContextInterface testCaseRC = TestCaseResourceContext.builder().build();
+    OperationContext testCaseOpContext =
+        new OperationContext(Entity.TEST_CASE, MetadataOperation.VIEW_BASIC);
+    authRequests.add(new AuthRequest(testCaseOpContext, testCaseRC));
+    if (testSuiteId != null) {
+      ResourceContextInterface testSuiteRC =
+          TestCaseResourceContext.builder().testSuiteId(testSuiteId).build();
+      OperationContext testSuiteOpContext =
+          new OperationContext(Entity.TEST_SUITE, MetadataOperation.VIEW_BASIC);
+      authRequests.add(new AuthRequest(testSuiteOpContext, testSuiteRC));
+    }
 
-    ResourceContextInterface resourceContextInterface =
-        getResourceContext(entityLink, searchListFilter);
-
-    // Override OperationContext to change the entity to table and operation from VIEW_ALL to
-    // VIEW_TESTS
-    OperationContext operationContext =
-        new OperationContext(Entity.TABLE, MetadataOperation.VIEW_TESTS);
+    if (!nullOrEmpty(entityLink)) {
+      ResourceContextInterface tableRC = getResourceContext(entityLink, searchListFilter);
+      OperationContext tableOperationContext =
+          new OperationContext(Entity.TABLE, MetadataOperation.VIEW_TESTS);
+      authRequests.add(new AuthRequest(tableOperationContext, tableRC));
+    }
     Fields fields = getFields(fieldsParam);
 
     ResultList<TestCase> tests =
@@ -1437,9 +1560,50 @@ public class TestCaseResource extends EntityResource<TestCase, TestCaseRepositor
             searchSortFilter,
             q,
             queryString,
-            operationContext,
-            resourceContextInterface);
+            authRequests);
 
     return PIIMasker.getTestCases(tests, authorizer, securityContext);
+  }
+
+  private void validateTestSuiteOps(TestSuite testSuite, SecurityContext securityContext) {
+    OperationContext editTestsOpContext =
+        new OperationContext(Entity.TEST_SUITE, MetadataOperation.EDIT_TESTS);
+    ResourceContextInterface testSuiteRC =
+        TestCaseResourceContext.builder().entity(testSuite).build();
+
+    OperationContext editAllOpContext =
+        new OperationContext(Entity.TEST_SUITE, MetadataOperation.EDIT_ALL);
+
+    List<AuthRequest> requests =
+        List.of(
+            new AuthRequest(editTestsOpContext, testSuiteRC),
+            new AuthRequest(editAllOpContext, testSuiteRC));
+    authorizer.authorizeRequests(securityContext, requests, AuthorizationLogic.ANY);
+    if (Boolean.TRUE.equals(testSuite.getBasic())) {
+      throw new IllegalArgumentException("You are trying to add test cases to a basic test suite.");
+    }
+  }
+
+  private List<UUID> getExcludedIdsFromSelection(BundleSuiteBulkAddRequestBulkAll bulkAll) {
+    if (bulkAll == null || bulkAll.getFilter() == null) {
+      return List.of();
+    }
+
+    org.openmetadata.schema.api.tests.Filter filter = bulkAll.getFilter();
+    return filter.getExcludeIds();
+  }
+
+  @Override
+  protected void processChangeEventForBulkImport(
+      EntityRepository<EntityInterface> versioningRepo,
+      UriInfo uriInfo,
+      SecurityContext securityContext,
+      String name,
+      CsvImportResult result) {
+    // No-op: change events for affected test suites are emitted
+    // directly from TestCaseCsv.createEntity() where we have
+    // the context of which test suites were touched
+    // this allows us to process changes events when performing
+    // bulk upload at the obs tab level where we have no parent test suites
   }
 }

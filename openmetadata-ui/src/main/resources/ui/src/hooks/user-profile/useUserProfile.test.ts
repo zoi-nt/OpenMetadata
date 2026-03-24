@@ -10,28 +10,57 @@
  *  See the License for the specific language governing permissions and
  *  limitations under the License.
  */
+import { waitFor } from '@testing-library/react';
 import { renderHook } from '@testing-library/react-hooks';
 import { getUserByName } from '../../rest/userAPI';
 import { useUserProfile } from './useUserProfile';
 
-jest.mock('../useApplicationStore', () => ({
-  useApplicationStore: jest.fn().mockImplementation(() => ({
-    userProfilePics: {
-      userJohn: {
-        profile: {
-          iamge512: 'profile512',
-        },
-      },
+jest.mock('../useApplicationStore', () => {
+  const mockUpdateUserProfilePics = jest.fn();
+  (globalThis as Record<string, unknown>).__mockUpdateUserProfilePics =
+    mockUpdateUserProfilePics;
+
+  const mockUserProfile = {
+    profile: {
+      iamge512: 'profile512',
     },
-    updateUserProfilePics: jest.fn(),
-  })),
-}));
+  };
+
+  const mockState = {
+    userProfilePics: {
+      userJohn: mockUserProfile,
+      userjohn: mockUserProfile,
+    },
+    updateUserProfilePics: mockUpdateUserProfilePics,
+  };
+
+  const mockUseApplicationStore = Object.assign(
+    jest.fn((selector: (state: typeof mockState) => unknown) => {
+      if (typeof selector === 'function') {
+        return selector(mockState);
+      }
+
+      return mockState;
+    }),
+    { getState: jest.fn(() => mockState) }
+  );
+
+  return { useApplicationStore: mockUseApplicationStore };
+});
 
 jest.mock('../../rest/userAPI', () => ({
   getUserByName: jest.fn(),
 }));
 
 describe('useUserProfile hook', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (
+      (globalThis as Record<string, unknown>)
+        .__mockUpdateUserProfilePics as jest.Mock
+    )?.mockClear();
+  });
+
   it('should not call api if permission is not there', () => {
     const { result } = renderHook(() =>
       useUserProfile({ permission: false, name: '' })
@@ -88,5 +117,28 @@ describe('useUserProfile hook', () => {
         iamge512: 'profile512',
       },
     });
+  });
+
+  it('should cache a placeholder user when profile fetch is forbidden', async () => {
+    (getUserByName as jest.Mock).mockRejectedValueOnce({
+      response: { status: 403 },
+    });
+
+    renderHook(() =>
+      useUserProfile({ permission: true, name: 'blocked-user' })
+    );
+
+    await waitFor(() =>
+      expect(
+        (globalThis as Record<string, unknown>).__mockUpdateUserProfilePics
+      ).toHaveBeenCalledWith({
+        id: 'blocked-user',
+        user: {
+          name: 'blocked-user',
+          id: 'blocked-user',
+          email: '',
+        },
+      })
+    );
   });
 });

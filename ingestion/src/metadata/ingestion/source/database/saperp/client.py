@@ -19,7 +19,8 @@ from typing import Any, List, Optional, Union
 from metadata.generated.schema.entity.services.connections.database.sapErpConnection import (
     SapErpConnection,
 )
-from metadata.ingestion.ometa.client import REST, ClientConfig
+from metadata.ingestion.connections.source_api_client import TrackedREST
+from metadata.ingestion.ometa.client import ClientConfig
 from metadata.ingestion.source.database.saperp.constants import PARAMS_DATA
 from metadata.ingestion.source.database.saperp.models import (
     SapErpColumn,
@@ -62,15 +63,14 @@ class SapErpClient:
             retry_wait=2,
             verify=get_verify_ssl(config.sslConfig),
         )
-        self.client = REST(client_config)
+        self.client = TrackedREST(client_config, source_name="saperp")
 
     def test_table_api(self):
         """
         Check metadata connection to SAS ERP tables API
         """
         params_data = PARAMS_DATA
-        response_data = self.client._request(  # pylint: disable=protected-access
-            method="GET",
+        response_data = self.client.get(
             path="/ECC/DDIC/ZZ_I_DDIC_TAB_CDS/",
             headers=HEADERS,
             data=params_data,
@@ -86,8 +86,7 @@ class SapErpClient:
         Check metadata connection to SAP ERP columns API
         """
         params_data = PARAMS_DATA
-        response_data = self.client._request(  # pylint: disable=protected-access
-            method="GET",
+        response_data = self.client.get(
             path="/ECC/DDIC/ZZ_I_DDIC_COL_CDS/",
             headers=HEADERS,
             data=params_data,
@@ -106,9 +105,7 @@ class SapErpClient:
         """
         entities_list = []
         params_data.update(PARAMS_DATA)
-        response_data = self.client._request(  # pylint: disable=protected-access
-            method="GET", path=api_url, headers=HEADERS, data=params_data
-        )
+        response_data = self.client.get(path=api_url, headers=HEADERS, data=params_data)
         response = model_class(**response_data)
         count = response.d.count
         indexes = math.ceil(count / entities_per_page)
@@ -120,10 +117,8 @@ class SapErpClient:
                         "$skip": str(index * entities_per_page),
                     }
                 )
-                response_data = (
-                    self.client._request(  # pylint: disable=protected-access
-                        method="GET", path=api_url, headers=HEADERS, data=params_data
-                    )
+                response_data = self.client.get(
+                    path=api_url, headers=HEADERS, data=params_data
                 )
                 response = model_class(**response_data)
                 entities_list.extend(response.d.results)

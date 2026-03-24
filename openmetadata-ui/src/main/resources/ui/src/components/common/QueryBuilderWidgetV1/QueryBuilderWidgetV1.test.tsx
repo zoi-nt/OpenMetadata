@@ -10,7 +10,6 @@
  *  See the License for the specific language governing permissions and
  *  limitations under the License.
  */
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { JsonTree, Utils } from '@react-awesome-query-builder/antd';
 import '@testing-library/jest-dom';
 import {
@@ -76,8 +75,8 @@ jest.mock('../../../utils/SearchClassBase', () => ({
   __esModule: true,
   default: {
     getEntityTypeSearchIndexMapping: jest.fn().mockImplementation(() => ({
-      [EntityType.TABLE]: 'table_search_index',
-      [EntityType.ALL]: 'all_search_index',
+      [EntityType.TABLE]: 'table',
+      [EntityType.ALL]: 'all',
     })),
   },
 }));
@@ -170,7 +169,7 @@ describe('QueryBuilderWidgetV1', () => {
       ).toBeInTheDocument();
       expect(getTreeConfig).toHaveBeenCalledWith(
         expect.objectContaining({
-          searchIndex: 'table_search_index',
+          searchIndex: 'table',
           searchOutputType: SearchOutputType.ElasticSearch,
           isExplorePage: false,
         })
@@ -546,7 +545,7 @@ describe('QueryBuilderWidgetV1', () => {
       ).toHaveBeenCalled();
       expect(getTreeConfig).toHaveBeenCalledWith(
         expect.objectContaining({
-          searchIndex: 'table_search_index',
+          searchIndex: 'table',
         })
       );
     });
@@ -556,7 +555,7 @@ describe('QueryBuilderWidgetV1', () => {
 
       expect(getTreeConfig).toHaveBeenCalledWith(
         expect.objectContaining({
-          searchIndex: 'all_search_index',
+          searchIndex: 'all',
         })
       );
     });

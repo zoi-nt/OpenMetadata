@@ -1,5 +1,5 @@
 /*
- *  Copyright 2025 Collate.
+ *  Copyright 2026 Collate.
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
  *  You may obtain a copy of the License at
@@ -26,6 +26,10 @@ export interface GlossaryTerm {
      * Count of immediate children glossary terms.
      */
     childrenCount?: number;
+    /**
+     * Optional mappings to external concepts (e.g., SKOS alignments).
+     */
+    conceptMappings?: ConceptMapping[];
     /**
      * List of data products this entity is part of.
      */
@@ -110,9 +114,9 @@ export interface GlossaryTerm {
      */
     references?: TermReference[];
     /**
-     * Other glossary terms that are related to this glossary term.
+     * Other glossary terms that are related to this glossary term with typed semantic relations.
      */
-    relatedTerms?: EntityReference[];
+    relatedTerms?: TermRelation[];
     /**
      * User names of the reviewers for this glossary.
      */
@@ -235,6 +239,8 @@ export interface FieldChange {
  *
  * Parent glossary term that this term is child of. When `null` this term is the root term
  * of the glossary.
+ *
+ * Reference to the related glossary term.
  */
 export interface EntityReference {
     /**
@@ -280,6 +286,42 @@ export interface EntityReference {
 }
 
 /**
+ * Mapping to an external concept (e.g., SKOS concept IRI).
+ */
+export interface ConceptMapping {
+    /**
+     * External concept IRI to map this glossary term to.
+     */
+    conceptIri: string;
+    /**
+     * Type of mapping used for the external concept alignment.
+     */
+    mappingType: ConceptMappingType;
+    /**
+     * Optional external concept scheme IRI for the mapped concept.
+     */
+    schemeIri?: string;
+    /**
+     * Optional source label or catalog for the external concept.
+     */
+    source?: string;
+}
+
+/**
+ * Type of mapping used for the external concept alignment.
+ *
+ * Type of mapping used to align this term with an external concept.
+ */
+export enum ConceptMappingType {
+    BroadMatch = "BROAD_MATCH",
+    CloseMatch = "CLOSE_MATCH",
+    ExactMatch = "EXACT_MATCH",
+    NarrowMatch = "NARROW_MATCH",
+    RelatedMatch = "RELATED_MATCH",
+    SameAs = "SAME_AS",
+}
+
+/**
  * Approval status of the glossary term.
  *
  * Status of an entity. It is used for governance and is applied to all the entities in the
@@ -315,6 +357,22 @@ export interface TermReference {
      * Name that identifies the source of an external glossary term. Example `HealthCare.gov`.
      */
     name?: string;
+}
+
+/**
+ * This schema defines the TermRelation type used for establishing typed semantic
+ * relationships between glossary terms.
+ */
+export interface TermRelation {
+    /**
+     * Type of the relation (e.g., 'broader', 'narrower', 'synonym', 'relatedTo'). Defaults to
+     * 'relatedTo' for backward compatibility.
+     */
+    relationType?: string;
+    /**
+     * Reference to the related glossary term.
+     */
+    term: EntityReference;
 }
 
 /**
@@ -359,6 +417,14 @@ export interface CoverImage {
  */
 export interface TagLabel {
     /**
+     * Timestamp when this tag was applied in ISO 8601 format
+     */
+    appliedAt?: Date;
+    /**
+     * Who it is that applied this tag (e.g: a bot, AI or a human)
+     */
+    appliedBy?: string;
+    /**
      * Description for the tag label.
      */
     description?: string;
@@ -378,6 +444,11 @@ export interface TagLabel {
      * used to determine the tag label.
      */
     labelType: LabelType;
+    /**
+     * Additional metadata associated with this tag label, such as recognizer information for
+     * automatically applied tags.
+     */
+    metadata?: TagLabelMetadata;
     /**
      * Name of the tag or glossary term.
      */
@@ -412,6 +483,75 @@ export enum LabelType {
     Generated = "Generated",
     Manual = "Manual",
     Propagated = "Propagated",
+}
+
+/**
+ * Additional metadata associated with this tag label, such as recognizer information for
+ * automatically applied tags.
+ *
+ * Additional metadata associated with a tag label, including information about how the tag
+ * was applied.
+ */
+export interface TagLabelMetadata {
+    /**
+     * Metadata about the recognizer that automatically applied this tag
+     */
+    recognizer?: TagLabelRecognizerMetadata;
+}
+
+/**
+ * Metadata about the recognizer that automatically applied this tag
+ *
+ * Metadata about the recognizer that applied a tag, including scoring and pattern
+ * information.
+ */
+export interface TagLabelRecognizerMetadata {
+    /**
+     * Details of patterns that matched during recognition
+     */
+    patterns?: PatternMatch[];
+    /**
+     * Unique identifier of the recognizer that applied this tag
+     */
+    recognizerId: string;
+    /**
+     * Human-readable name of the recognizer
+     */
+    recognizerName: string;
+    /**
+     * Confidence score assigned by the recognizer (0.0 to 1.0)
+     */
+    score: number;
+    /**
+     * What the recognizer analyzed to apply this tag
+     */
+    target?: Target;
+}
+
+/**
+ * Information about a pattern that matched during recognition
+ */
+export interface PatternMatch {
+    /**
+     * Name of the pattern that matched
+     */
+    name: string;
+    /**
+     * Regular expression or pattern definition
+     */
+    regex?: string;
+    /**
+     * Confidence score for this specific pattern match
+     */
+    score: number;
+}
+
+/**
+ * What the recognizer analyzed to apply this tag
+ */
+export enum Target {
+    ColumnName = "column_name",
+    Content = "content",
 }
 
 /**

@@ -29,11 +29,11 @@ export const updatePersonaDisplayName = async ({
     '[data-testid="manage-dropdown-list-container"] [data-testid="rename-button"]'
   );
 
-  await page.waitForSelector('#name', { state: 'visible' });
+  await page.locator('#name').waitFor({ state: 'visible' });
 
   await expect(page.locator('#name')).toBeDisabled();
 
-  await page.waitForSelector('#displayName', { state: 'visible' });
+  await page.locator('#displayName').waitFor({ state: 'visible' });
   await page.fill('#displayName', displayName);
 
   await page.click('[data-testid="save-button"]');
@@ -44,11 +44,10 @@ export const updatePersonaDisplayName = async ({
  */
 export const navigateToPersonaSettings = async (page: Page) => {
   await redirectToHomePage(page);
+  const listPersonas = page.waitForResponse('/api/v1/personas?*');
   await settingClick(page, GlobalSettingOptions.PERSONA);
-  await page.waitForLoadState('networkidle');
-  await page.waitForSelector('[data-testid="loader"]', {
-    state: 'detached',
-  });
+  await listPersonas;
+  await waitForAllLoadersToDisappear(page, 'skeleton-loader');
 };
 
 /**
@@ -59,11 +58,10 @@ export const checkPersonaInProfile = async (
   expectedPersonaName?: string
 ) => {
   await page.locator('[data-testid="dropdown-profile"] svg').click();
-  await page.waitForSelector('[role="menu"].profile-dropdown', {
+  await page.locator('[role="menu"].profile-dropdown').waitFor({
     state: 'visible',
   });
   await page.getByTestId('user-name').click();
-  await page.waitForLoadState('networkidle');
 
   if (expectedPersonaName) {
     // Expect persona to be visible with specific name
@@ -93,27 +91,6 @@ export const setPersonaAsDefault = async (page: Page) => {
   await setAsDefaultResponse;
 };
 
-/**
- * Remove persona default through the admin UI
- */
-export const removePersonaDefault = async (
-  page: Page,
-  personaName?: string
-) => {
-  await page.getByTestId(`persona-details-card-${personaName}`).click();
-
-  await page.getByTestId('manage-button').click();
-  await page.getByTestId('remove-default-button').click();
-
-  const removeDefaultResponse = page.waitForResponse('/api/v1/personas/*');
-  const removeDefaultConfirmationModal = page.getByTestId(
-    'default-persona-confirmation-modal'
-  );
-
-  await removeDefaultConfirmationModal.getByText('Yes').click();
-  await removeDefaultResponse;
-};
-
 export const navigateToPersonaWithPagination = async (
   page: Page,
   personaName: string,
@@ -121,12 +98,28 @@ export const navigateToPersonaWithPagination = async (
   maxPages = 15
 ) => {
   for (let currentPage = 0; currentPage < maxPages; currentPage++) {
+    // Wait for the skeleton card loader to disappear first
+    await waitForAllLoadersToDisappear(page, 'skeleton-card-loader');
+
     const locator = page.getByTestId(`persona-details-card-${personaName}`);
 
     // Check if element is visible on current page
     if (await locator.isVisible()) {
       if (click) {
+        const personaDetailsResponse = page
+          .waitForResponse(
+            (response) =>
+              response.url().includes('/api/v1/personas/name/') &&
+              response.status() === 200,
+            { timeout: 30000 }
+          )
+          .catch(() => undefined);
+
         await locator.click();
+        await personaDetailsResponse;
+        await expect(
+          page.getByRole('tab', { name: 'Customize UI' })
+        ).toBeVisible();
       }
 
       return;
@@ -138,8 +131,26 @@ export const navigateToPersonaWithPagination = async (
     const getPersonas = page.waitForResponse('/api/v1/personas*');
     await nextBtn.click();
     await getPersonas;
-
-    await page.waitForLoadState('networkidle');
-    await waitForAllLoadersToDisappear(page, 'skeleton-card-loader');
   }
+};
+
+/**
+ * Remove persona default through the admin UI
+ */
+export const removePersonaDefault = async (
+  page: Page,
+  personaName?: string
+) => {
+  await navigateToPersonaWithPagination(page, personaName ?? '');
+
+  await page.getByTestId('manage-button').click();
+  await page.getByTestId('remove-default-button').click();
+
+  const removeDefaultResponse = page.waitForResponse('/api/v1/personas/*');
+  const removeDefaultConfirmationModal = page.getByTestId(
+    'default-persona-confirmation-modal'
+  );
+
+  await removeDefaultConfirmationModal.getByText('Yes').click();
+  await removeDefaultResponse;
 };

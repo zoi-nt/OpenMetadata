@@ -68,10 +68,13 @@ const APIEndpointDetails: React.FC<APIEndpointDetailsProps> = ({
 }: APIEndpointDetailsProps) => {
   const { t } = useTranslation();
   const { currentUser } = useApplicationStore();
-  const { tab: activeTab = EntityTabs.SCHEMA } =
-    useRequiredParams<{ tab: EntityTabs }>();
-  const { fqn: decodedApiEndpointFqn } = useFqn();
+  const { tab: activeTab = EntityTabs.SCHEMA } = useRequiredParams<{
+    tab: EntityTabs;
+  }>();
   const navigate = useNavigate();
+  const { entityFqn: decodedApiEndpointFqn } = useFqn({
+    type: EntityType.API_ENDPOINT,
+  });
   const [feedCount, setFeedCount] = useState<FeedCounts>(
     FEED_COUNT_INITIAL_DATA
   );
@@ -272,10 +275,7 @@ const APIEndpointDetails: React.FC<APIEndpointDetailsProps> = ({
   }
 
   return (
-    <PageLayoutV1
-      pageTitle={t('label.entity-detail-plural', {
-        entity: t('label.api-endpoint'),
-      })}>
+    <PageLayoutV1 pageTitle={getEntityName(apiEndpointDetails)}>
       <Row gutter={[0, 12]}>
         <Col span={24}>
           <DataAssetsHeader

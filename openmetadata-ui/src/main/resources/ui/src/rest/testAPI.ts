@@ -16,7 +16,12 @@ import { Operation } from 'fast-json-patch';
 import { PagingResponse } from 'Models';
 import { SORT_ORDER } from '../enums/common.enum';
 import { TestCaseType, TestSuiteType } from '../enums/TestSuite.enum';
+import {
+  BundleSuiteBulkAddRequestClass,
+  Mode as BundleSuiteBulkAddMode,
+} from '../generated/api/tests/bundleSuiteBulkAddRequest';
 import { CreateTestCase } from '../generated/api/tests/createTestCase';
+import { CreateTestDefinition } from '../generated/api/tests/createTestDefinition';
 import { CreateTestSuite } from '../generated/api/tests/createTestSuite';
 import { DataQualityReport } from '../generated/tests/dataQualityReport';
 import {
@@ -36,6 +41,7 @@ import { EntityHistory } from '../generated/type/entityHistory';
 import { Include } from '../generated/type/include';
 import { Paging } from '../generated/type/paging';
 import { ListParams } from '../interface/API.interface';
+import { CSVImportAsyncResponse } from '../pages/EntityImport/BulkEntityImportPage/BulkEntityImportPage.interface';
 import { getEncodedFqn } from '../utils/StringsUtils';
 import APIClient from './index';
 
@@ -55,6 +61,8 @@ export type ListTestSuitePramsBySearch = ListTestSuitePrams & {
 
 export type ListTestCaseParams = ListParams & {
   entityLink?: string;
+  entityFQN?: string;
+  columnName?: string;
   testSuiteId?: string;
   includeAllTests?: boolean;
   testCaseStatus?: TestCaseStatus;
@@ -78,8 +86,10 @@ export type ListTestCaseParamsBySearch = ListTestCaseParams & {
 
 export type ListTestDefinitionsParams = ListParams & {
   entityType?: EntityType;
-  testPlatform: TestPlatform;
+  testPlatform?: TestPlatform;
   supportedDataType?: string;
+  enabled?: boolean;
+  supportedService?: string;
 };
 
 export type ListTestCaseResultsParams = Omit<
@@ -114,6 +124,7 @@ export type DataQualityReportParamsType = {
   q?: string;
   aggregationQuery: string;
   index: string;
+  domain?: string;
 };
 
 export type TestCaseDimensionResultParams = {
@@ -207,6 +218,33 @@ export const addTestCaseToLogicalTestSuite = async (
   return response.data;
 };
 
+export type AddTestCaseListSubmitPayload = {
+  selectAll: boolean;
+  includeIds: string[];
+  excludeIds: string[];
+};
+
+export const addTestCasesToLogicalTestSuiteBulk = async (
+  testSuiteId: string,
+  payload: AddTestCaseListSubmitPayload
+): Promise<TestSuite> => {
+  const request: BundleSuiteBulkAddRequestClass = {
+    testSuiteId,
+    mode: payload.selectAll
+      ? BundleSuiteBulkAddMode.All
+      : BundleSuiteBulkAddMode.IDS,
+    selection: payload.selectAll
+      ? { filter: { excludeIds: payload.excludeIds } }
+      : { ids: payload.includeIds },
+  };
+  const response = await APIClient.put<
+    BundleSuiteBulkAddRequestClass,
+    AxiosResponse<TestSuite>
+  >(`${testCaseUrl}/logicalTestCases/bulk`, request);
+
+  return response.data;
+};
+
 export const removeTestCaseFromTestSuite = async (
   testCaseId: string,
   testSuiteId: string
@@ -271,6 +309,49 @@ export const getTestDefinitionById = async (
 ) => {
   const response = await APIClient.get<TestDefinition>(
     `${testDefinitionUrl}/${id}`,
+    {
+      params,
+    }
+  );
+
+  return response.data;
+};
+
+export const createTestDefinition = async (data: CreateTestDefinition) => {
+  const response = await APIClient.post<TestDefinition>(
+    testDefinitionUrl,
+    data
+  );
+
+  return response.data;
+};
+
+export const updateTestDefinition = async (data: TestDefinition) => {
+  const response = await APIClient.put<TestDefinition>(testDefinitionUrl, data);
+
+  return response.data;
+};
+
+export const patchTestDefinition = async (id: string, patch: Operation[]) => {
+  const response = await APIClient.patch<TestDefinition>(
+    `${testDefinitionUrl}/${id}`,
+    patch
+  );
+
+  return response.data;
+};
+
+export const deleteTestDefinitionByFqn = async (
+  fqn: string,
+  paramsValue?: { hardDelete?: boolean; recursive?: boolean }
+) => {
+  const params = {
+    hardDelete: true,
+    recursive: true,
+    ...paramsValue,
+  };
+  const response = await APIClient.delete<TestDefinition>(
+    `${testDefinitionUrl}/name/${fqn}`,
     {
       params,
     }
@@ -362,6 +443,7 @@ interface ListTestCasesParams {
   after?: string;
   entityFQN?: string;
   entityLink?: string;
+  columnName?: string;
   testSuiteId?: string;
   include?: Include;
   testCaseStatus?: TestCaseStatus;
@@ -375,6 +457,18 @@ export const listTestCases = async (params: ListTestCasesParams) => {
     {
       params,
     }
+  );
+
+  return response.data;
+};
+
+export const exportTestCasesInCSV = async (
+  name: string,
+  params?: { recursive?: boolean }
+): Promise<CSVImportAsyncResponse> => {
+  const response = await APIClient.get(
+    `/dataQuality/testCases/name/${getEncodedFqn(name)}/exportAsync`,
+    { params }
   );
 
   return response.data;

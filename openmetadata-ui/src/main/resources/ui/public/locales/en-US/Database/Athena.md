@@ -174,6 +174,18 @@ You can find more information about <a href="https://docs.aws.amazon.com/athena/
 $$
 
 $$section
+### Catalog ID $(id="catalogId")
+
+The catalog ID for Athena. This is required when ingesting metadata from:
+- **S3 Tables**: Use the format `s3tablescatalog/<bucket-name>` (e.g., `s3tablescatalog/my-table-bucket`)
+- **Cross-account catalogs**: Use the AWS account ID of the account that owns the Glue Data Catalog
+
+If not provided, defaults to the caller's AWS account.
+
+Find more information about <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables.html" target="_blank">S3 Tables</a> and <a href="https://docs.aws.amazon.com/glue/latest/dg/cross-account-access.html" target="_blank">Cross-account access in AWS Glue</a>.
+$$
+
+$$section
 ### Database Name $(id="databaseName")
 
 In OpenMetadata, the Database Service hierarchy works as follows:
@@ -199,4 +211,29 @@ $$section
 The prefix of a data source refers to the first part of the data path that identifies the source or origin of the data.
 
 It's used to organize and categorize data within the container, and can help users easily locate and access the data they need.
+$$
+
+$$section
+### Connection Options $(id="connectionOptions")
+Additional connection options to build the URL that can be sent to service during the connection.
+$$
+
+$$section
+### Connection Arguments $(id="connectionArguments")
+Additional connection arguments such as security or protocol configs that can be sent to service during connection.
+$$
+
+$$section
+### Default Database Filter Pattern $(id="databaseFilterPattern")
+Regex to only include/exclude databases that matches the pattern.
+$$
+
+$$section
+### Default Schema Filter Pattern $(id="schemaFilterPattern")
+Regex to only include/exclude schemas that matches the pattern.
+$$
+
+$$section
+### Default Table Filter Pattern $(id="tableFilterPattern")
+Regex to only include/exclude tables that matches the pattern.
 $$

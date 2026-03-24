@@ -82,7 +82,6 @@ jest.mock('../../utils/FeedUtils', () => ({
 
 jest.mock('../../hooks/useDomainStore', () => ({
   useDomainStore: jest.fn().mockImplementation(() => ({
-    domainOptions: jest.fn().mockReturnValue('domainOptions'),
     activeDomain: jest.fn().mockReturnValue('activeDomain'),
     updateActiveDomain: jest.fn(),
   })),
@@ -174,6 +173,7 @@ jest.mock('../../utils/EntityUtilClassBase', () => ({
 
 jest.mock('../../utils/EntityUtils', () => ({
   getEntityName: jest.fn().mockReturnValue('MockedEntityName'),
+  getDomainDisplayName: jest.fn().mockReturnValue('All Domains'),
 }));
 
 jest.mock(

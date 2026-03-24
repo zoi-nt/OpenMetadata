@@ -35,6 +35,9 @@ from metadata.generated.schema.entity.services.databaseService import DatabaseSe
 from metadata.generated.schema.entity.services.ingestionPipelines.status import (
     StackTraceError,
 )
+from metadata.generated.schema.metadataIngestion.parserconfig.queryParserConfig import (
+    QueryParserType,
+)
 from metadata.generated.schema.type.entityLineage import (
     ColumnLineage,
     EntitiesEdge,
@@ -43,11 +46,7 @@ from metadata.generated.schema.type.entityLineage import (
 from metadata.generated.schema.type.entityLineage import Source as LineageSource
 from metadata.generated.schema.type.entityReference import EntityReference
 from metadata.ingestion.api.models import Either
-from metadata.ingestion.lineage.models import (
-    Dialect,
-    QueryParsingError,
-    QueryParsingFailures,
-)
+from metadata.ingestion.lineage.models import Dialect
 from metadata.ingestion.lineage.parser import LINEAGE_PARSING_TIMEOUT, LineageParser
 from metadata.ingestion.ometa.ometa_api import OpenMetadata
 from metadata.utils import fqn
@@ -59,19 +58,33 @@ from metadata.utils.execution_time_tracker import (
 from metadata.utils.fqn import build_es_fqn_search_string
 from metadata.utils.logger import utils_logger
 from metadata.utils.lru_cache import LRU_CACHE_SIZE, LRUCache
+from metadata.utils.timeout import timeout
 
 logger = utils_logger()
 DEFAULT_SCHEMA_NAME = "<default>"
 CUTOFF_NODES = 20
+NODE_PROCESSING_TIMEOUT = 30  # seconds
 
 
 # pylint: disable=too-many-function-args,protected-access
-def get_column_fqn(table_entity: Table, column: str) -> Optional[str]:
+def get_column_fqn(
+    table_entity: Table,
+    column: str,
+    table: Optional[str] = None,
+    schema: Optional[str] = None,
+    database: Optional[str] = None,
+) -> Optional[str]:
     """
     Get fqn of column if exist in table entity
     """
-    if not table_entity:
+    if (
+        (not table_entity)
+        or (table and table != table_entity.name.root)
+        or (schema and schema != table_entity.databaseSchema.name)
+        or (database and database != table_entity.database.name)
+    ):
         return None
+
     for tbl_column in table_entity.columns or []:
         try:
             if column.lower() == tbl_column.name.root.lower():
@@ -87,6 +100,88 @@ def get_column_fqn(table_entity: Table, column: str) -> Optional[str]:
 
 
 search_cache = LRUCache(LRU_CACHE_SIZE)
+database_service_type_cache = LRUCache(LRU_CACHE_SIZE)
+
+
+@calculate_execution_time(context="GetDatabaseServiceType")
+def get_database_service_type(
+    metadata: OpenMetadata, service_name: str
+) -> Optional[str]:
+    """
+    Get the database service type (e.g., 'mysql', 'postgres', 'clickhouse').
+
+    Args:
+        metadata: OMeta client
+        service_name: service name
+
+    Returns:
+        The database service type or None if not found.
+    """
+    if service_name in database_service_type_cache:
+        return database_service_type_cache.get(service_name)
+
+    try:
+        # try ES search first
+        es_result_entities = metadata.es_search_from_fqn(
+            entity_type=DatabaseService,
+            fqn_search_string=service_name,
+        )
+
+        service: Optional[DatabaseService] = None
+        if es_result_entities:
+            service = es_result_entities[0] if es_result_entities else None
+
+        # try API search if ES is empty
+        if not service:
+            service = metadata.get_by_name(entity=DatabaseService, fqn=service_name)
+
+        if service:
+            service_type = service.connection.config.type.value.lower()
+            logger.debug(
+                f"Service (name={service.name.root}) is of type '{service_type}'"
+            )
+
+            # cache the result
+            database_service_type_cache.put(service_name, service_type)
+            return service_type
+
+    except Exception as exc:
+        logger.debug(traceback.format_exc())
+        logger.warning(
+            f"Could not determine service type for service '{service_name}': {exc}"
+        )
+
+    return None
+
+
+def normalize_table_params_by_service(
+    metadata: OpenMetadata,
+    service_name: str,
+    database: Optional[str],
+    database_schema: Optional[str],
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Normalize database and schema parameters based on service type.
+
+    Certain database types require parameter normalization:
+    - ClickHouse: Uses database_schema as schema, sets database to None
+
+    Args:
+        metadata: OMeta client
+        service_name: service name
+        database: database name
+        database_schema: schema name
+
+    Returns:
+        Tuple of (normalized_database, normalized_schema)
+    """
+    conn_type = get_database_service_type(metadata, service_name)
+
+    # ClickHouse normalization
+    if conn_type == "clickhouse" and database:
+        return None, database_schema
+
+    return database, database_schema
 
 
 @calculate_execution_time(context="SearchTableEntities")
@@ -113,41 +208,26 @@ def search_table_entities(
     """
     if isinstance(service_names, str):
         service_names = [service_names]
+
     for service_name in service_names:
-        # Detect the connection type
-        try:
-            service: DatabaseService = metadata.get_by_name(
-                entity=DatabaseService, fqn=service_name
-            )
 
-            conn_type = service.connection.config.type.value.lower()
-            logger.debug(
-                f"Searching for connection type '{conn_type}' in service '{service.name}'"
-            )
+        # normalize database and schema parameters based on service type
+        normalized_db, normalized_schema = normalize_table_params_by_service(
+            metadata, service_name, database, database_schema
+        )
 
-        except Exception:
-            conn_type = None
-            logger.warning(
-                f"Could not determine connection type for service '{service_name}'"
-            )
-
-        # ClickHouse normalization
-        if conn_type == "clickhouse" and database:
-            logger.debug(
-                f"ClickHouse detected. Using database_schema='{database_schema}' as schema, table='{table}'"
-            )
-            database = None
-
-        search_tuple = (service_name, database, database_schema, table)
+        search_tuple = (service_name, normalized_db, normalized_schema, table)
         if search_tuple in search_cache:
             result = search_cache.get(search_tuple)
             if result:
                 return result
+
         try:
             table_entities: Optional[List[Table]] = []
+
             # search on ES first
             fqn_search_string = build_es_fqn_search_string(
-                database, database_schema, service_name, table
+                normalized_db, normalized_schema, service_name, table
             )
             es_result_entities = metadata.es_search_from_fqn(
                 entity_type=Table,
@@ -161,8 +241,8 @@ def search_table_entities(
                     metadata,
                     entity_type=Table,
                     service_name=service_name,
-                    database_name=database,
-                    schema_name=database_schema,
+                    database_name=normalized_db,
+                    schema_name=normalized_schema,
                     table_name=table,
                     fetch_multiple_entities=True,
                     skip_es_search=True,
@@ -171,15 +251,18 @@ def search_table_entities(
                     table_entity: Table = metadata.get_by_name(Table, fqn=table_fqn)
                     if table_entity:
                         table_entities.append(table_entity)
+
             # added the search tuple to the cache
             search_cache.put(search_tuple, table_entities)
             if table_entities:
                 return table_entities
+
         except Exception as exc:
             logger.debug(traceback.format_exc())
             logger.error(
                 f"Error searching for table entities for service [{service_name}]: {exc}"
             )
+
     return None
 
 
@@ -285,13 +368,17 @@ def handle_udf_column_lineage(
 
 @functools.lru_cache(maxsize=1000)
 def _get_udf_parser(
-    code: str, dialect: Dialect, timeout_seconds: int
+    code: str,
+    dialect: Dialect,
+    timeout_seconds: int,
+    parser_type: QueryParserType = QueryParserType.Auto,
 ) -> Optional[LineageParser]:
     if code:
         return LineageParser(
             f"create table dummy_table_name as {code}",
             dialect=dialect,
             timeout_seconds=timeout_seconds,
+            parser_type=parser_type,
         )
     return None
 
@@ -326,7 +413,7 @@ def _replace_target_table(
                 try:
                     # remove the old edge
                     stmt_holder.graph.remove_edge(col_lineage[-2], tgt_col)
-                except Exception as _:
+                except Exception:
                     # if the edge is not present, pass
                     pass
 
@@ -576,6 +663,7 @@ def _build_table_lineage(
     column_lineage_map: dict,
     lineage_source: LineageSource = LineageSource.QueryLineage,
     procedure: Optional[EntityReference] = None,
+    temp_lineage_tables: Optional[List] = None,
 ) -> Either[AddLineageRequest]:
     """
     Prepare the lineage request generator
@@ -588,6 +676,7 @@ def _build_table_lineage(
         query (str): query
         column_lineage_map (dict): map of the column lineage
         lineage_source (LineageSource): lineage source
+        temp_lineage_tables (List[TempLineageTable]): lineage path through temporary tables
 
     Returns:
         Either[AddLineageRequest] with the lineage request or an error
@@ -603,6 +692,8 @@ def _build_table_lineage(
         lineage_details = LineageDetails(
             sqlQuery=masked_query, source=lineage_source, pipeline=procedure
         )
+        if temp_lineage_tables:
+            lineage_details.tempLineageTables = temp_lineage_tables
         if col_lineage:
             lineage_details.columnsLineage = col_lineage
         lineage = AddLineageRequest(
@@ -718,7 +809,7 @@ def _create_lineage_by_table_name(
         yield Either(
             left=StackTraceError(
                 name="Lineage",
-                error=f"Error creating lineage for service [{service_name}] from table [{from_table}]: {exc}",
+                error=f"Error creating lineage for service [{service_names}] from table [{from_table}]: {exc}",
                 stackTrace=traceback.format_exc(),
             )
         )
@@ -770,6 +861,7 @@ def get_lineage_by_query(
     lineage_parser: Optional[LineageParser] = None,
     schema_fallback: bool = False,
     service_name: Optional[str] = None,  # backward compatibility for python sdk
+    parser_type: QueryParserType = QueryParserType.Auto,
 ) -> Iterable[Either[AddLineageRequest]]:
     """
     This method parses the query to get source, target and intermediate table names to create lineage,
@@ -778,7 +870,7 @@ def get_lineage_by_query(
     Now supports cross-database lineage by accepting a list of service names.
     """
     column_lineage = {}
-    query_parsing_failures = QueryParsingFailures()
+
     if service_name and isinstance(service_name, str):
         service_names = [service_name]
         logger.warning(
@@ -789,10 +881,13 @@ def get_lineage_by_query(
     try:
         if not lineage_parser:
             lineage_parser = LineageParser(
-                query, dialect, timeout_seconds=timeout_seconds
+                query, dialect, timeout_seconds=timeout_seconds, parser_type=parser_type
             )
         masked_query = lineage_parser.masked_query
-        logger.debug(f"Running lineage with query: {masked_query or query}")
+        query_hash = lineage_parser.query_hash
+        logger.debug(
+            f"[{query_hash}] Running lineage with query: {masked_query or query}"
+        )
 
         raw_column_lineage = lineage_parser.column_lineage
         column_lineage.update(populate_column_lineage_map(raw_column_lineage))
@@ -864,13 +959,6 @@ def get_lineage_by_query(
                             graph=graph,
                             schema_fallback=schema_fallback,
                         )
-        if not lineage_parser.query_parsing_success:
-            query_parsing_failures.add(
-                QueryParsingError(
-                    query=masked_query or query,
-                    error=lineage_parser.query_parsing_failure_reason,
-                )
-            )
     except Exception as exc:
         yield Either(
             left=StackTraceError(
@@ -895,21 +983,22 @@ def get_lineage_via_table_entity(
     graph: Optional[DiGraph] = None,
     lineage_parser: Optional[LineageParser] = None,
     schema_fallback: bool = False,
+    parser_type: QueryParserType = QueryParserType.Auto,
 ) -> Iterable[Either[AddLineageRequest]]:
     """Get lineage from table entity"""
     column_lineage = {}
-    query_parsing_failures = QueryParsingFailures()
 
     if isinstance(service_names, str):
         service_names = [service_names]
     try:
         if not lineage_parser:
             lineage_parser = LineageParser(
-                query, dialect, timeout_seconds=timeout_seconds
+                query, dialect, timeout_seconds=timeout_seconds, parser_type=parser_type
             )
         masked_query = lineage_parser.masked_query
+        query_hash = lineage_parser.query_hash
         logger.debug(
-            f"Getting lineage via table entity using query: {masked_query or query}"
+            f"[{query_hash}] Getting lineage via table entity using query: {masked_query or query}"
         )
         to_table_name = table_entity.name.root
 
@@ -938,23 +1027,47 @@ def get_lineage_via_table_entity(
                     graph=graph,
                     schema_fallback=schema_fallback,
                 ) or []
-        if not lineage_parser.query_parsing_success:
-            query_parsing_failures.add(
-                QueryParsingError(
-                    query=masked_query,
-                    error=lineage_parser.query_parsing_failure_reason,
-                )
-            )
     except Exception as exc:  # pylint: disable=broad-except
         Either(
             left=StackTraceError(
                 name="Lineage",
-                error=f"Failed to create view lineage for database [{database_name}] and table [{table_entity}] with service(s) [{service_names}]: {exc}",
+                error=(
+                    f"Failed to create view lineage for database [{database_name}] and table [{table_entity}]"
+                    f" with service(s) [{service_names}]: {exc}"
+                ),
                 stackTrace=traceback.format_exc(),
             )
         )
 
 
+def _build_temp_table_lineage(
+    table_chain: List[str],
+    from_fqn: str,
+    to_fqn: str,
+) -> List:
+    """
+    Build a list of lineage hops through temporary/intermediate tables.
+
+    The first hop's source uses the from_fqn and the last hop's target uses
+    the to_fqn. Intermediate hops use the raw table names from the chain.
+
+    Returns:
+        List of TempLineageTable objects with fromEntity and toEntity fields.
+    """
+    from metadata.generated.schema.type.entityLineage import TempLineageTable
+
+    if len(table_chain) < 2:
+        return [TempLineageTable(fromEntity=from_fqn, toEntity=to_fqn)]
+
+    hops = []
+    for i in range(len(table_chain) - 1):
+        source = from_fqn if i == 0 else table_chain[i]
+        target = to_fqn if i == len(table_chain) - 2 else table_chain[i + 1]
+        hops.append(TempLineageTable(fromEntity=source, toEntity=target))
+    return hops
+
+
+@calculate_execution_time(context="GetLineageForPath")
 def _get_lineage_for_path(
     from_fqn: str,
     to_fqn: str,
@@ -962,9 +1075,11 @@ def _get_lineage_for_path(
     current_node: Any,
     table_chain: List[str],
     metadata: OpenMetadata,
+    merged_hops: Optional[List] = None,
 ) -> Optional[Either[AddLineageRequest]]:
     """
-    Get lineage for a pair of FQNs in the path
+    Get lineage for a pair of FQNs in the path.
+    If merged_hops is provided, uses those instead of computing from table_chain.
     """
     try:
         to_entity = get_entity_from_es_result(
@@ -980,18 +1095,21 @@ def _get_lineage_for_path(
             ),
         )
         if to_entity and from_entity:
-            # Create the table chain string
-            table_relationship = "--- TEMPT TABLE LINEAGE \n--- "
-            table_relationship += " > ".join(table_chain)
+            temp_lineage_hops = merged_hops or _build_temp_table_lineage(
+                table_chain=table_chain,
+                from_fqn=from_fqn,
+                to_fqn=to_fqn,
+            )
             return _build_table_lineage(
                 to_entity=to_entity,
                 from_entity=from_entity,
                 to_table_raw_name=str(current_node),
                 from_table_raw_name=str(from_node),
-                masked_query=table_relationship,  # Using table chain as the query
+                masked_query=None,
                 column_lineage_map={},
                 lineage_source=LineageSource.QueryLineage,
                 procedure=None,
+                temp_lineage_tables=temp_lineage_hops,
             )
     except Exception as exc:
         logger.debug(traceback.format_exc())
@@ -999,11 +1117,18 @@ def _get_lineage_for_path(
     return None
 
 
+@calculate_execution_time_generator(context="ProcessSequence")
 def _process_sequence(
-    sequence: List[Any], graph: DiGraph, metadata: OpenMetadata
+    sequence: List[Any],
+    graph: DiGraph,
+    metadata: OpenMetadata,
+    hops_map: Optional[Dict[tuple, List]] = None,
+    seen_pairs: Optional[set] = None,
 ) -> Iterable[Either[AddLineageRequest]]:
     """
     Process a sequence of nodes to generate lineage information.
+    When hops_map is provided, uses pre-merged temp lineage hops and skips
+    duplicate (from_fqn, to_fqn) pairs already emitted via seen_pairs.
     """
     from_node = None
     table_chain = []
@@ -1018,6 +1143,11 @@ def _process_sequence(
             if current_fqns and from_node is not None:
                 from_fqns = from_node.get("fqns", [])
                 for from_fqn, to_fqn in itertools.product(from_fqns, current_fqns):
+                    pair_key = (from_fqn, to_fqn)
+                    if seen_pairs is not None:
+                        if pair_key in seen_pairs:
+                            continue
+                        seen_pairs.add(pair_key)
                     lineage = _get_lineage_for_path(
                         from_fqn=from_fqn,
                         to_fqn=to_fqn,
@@ -1025,17 +1155,20 @@ def _process_sequence(
                         current_node=node,
                         table_chain=table_chain,
                         metadata=metadata,
+                        merged_hops=hops_map.get(pair_key) if hops_map else None,
                     )
                     if lineage:
                         yield lineage
 
             if current_fqns:
                 from_node = graph.nodes[node]
+                table_chain = [str(node).replace(f"{DEFAULT_SCHEMA_NAME}.", "")]
         except Exception as exc:
             logger.debug(traceback.format_exc())
             logger.error(f"Error creating lineage for node [{node}]: {exc}")
 
 
+@calculate_execution_time(context="GetPathsFromSubtree")
 def _get_paths_from_subtree(subtree: DiGraph) -> List[List[Any]]:
     """
     Get all paths from root nodes to leaf nodes in a subtree
@@ -1044,16 +1177,75 @@ def _get_paths_from_subtree(subtree: DiGraph) -> List[List[Any]]:
     # Find all root nodes (nodes with no incoming edges)
     root_nodes = [node for node in subtree if subtree.in_degree(node) == 0]
     # Find all leaf nodes (nodes with no outgoing edges)
-    leaf_nodes = [node for node in subtree if subtree.out_degree(node) == 0]
+    leaf_set = {node for node in subtree if subtree.out_degree(node) == 0}
+
+    # Isolated nodes have no edges at all (both root and leaf).
+    # nx.all_simple_paths(G, node, node) returns nothing for same source/target,
+    # so we handle them directly by emitting a single-element path.
+    isolated_nodes = [node for node in root_nodes if node in leaf_set]
+    for node in isolated_nodes:
+        paths.append([node])
+
+    # Only process roots that have at least one outgoing edge
+    non_isolated_roots = [node for node in root_nodes if node not in leaf_set]
+
+    @calculate_execution_time(context="ProcessRootNode")
+    @timeout(seconds=NODE_PROCESSING_TIMEOUT)
+    def process_root_node(root, leaf_nodes):
+        """Process a single root node and return all paths to leaf nodes."""
+        logger.debug(f"Processing root node {root}")
+        node_paths = []
+        for leaf in leaf_nodes:
+            node_paths.extend(
+                nx.all_simple_paths(subtree, root, leaf, cutoff=CUTOFF_NODES)
+            )
+        return node_paths
 
     # Find all simple paths from each root to each leaf
-    for root in root_nodes:
-        logger.debug(f"Processing root node {root}")
-        for leaf in leaf_nodes:
-            paths.extend(nx.all_simple_paths(subtree, root, leaf, cutoff=CUTOFF_NODES))
+    for root in non_isolated_roots:
+        try:
+            root_paths = process_root_node(root, leaf_set)
+            paths.extend(root_paths)
+        except TimeoutError:
+            logger.warning(
+                f"Processing root node {root} failed after timeout of {NODE_PROCESSING_TIMEOUT} seconds"
+            )
     return paths
 
 
+def _collect_temp_lineage_hops(
+    paths: List[List[Any]], graph: DiGraph
+) -> Dict[tuple, List]:
+    """
+    Pre-compute all temp lineage hops per (from_fqn, to_fqn) pair from paths.
+    This walks through each path without making any ES calls, collecting only
+    the lightweight TempLineageTable objects grouped by endpoint FQN pair.
+    """
+    hops_map: Dict[tuple, List] = {}
+    for sequence in paths:
+        from_node = None
+        table_chain: List[str] = []
+        for node in sequence:
+            current_node = graph.nodes[node]
+            current_fqns = current_node.get("fqns", [])
+            table_chain.append(str(node).replace(f"{DEFAULT_SCHEMA_NAME}.", ""))
+            if current_fqns and from_node is not None:
+                from_fqns = from_node.get("fqns", [])
+                for from_fqn, to_fqn in itertools.product(from_fqns, current_fqns):
+                    key = (from_fqn, to_fqn)
+                    temp_hops = _build_temp_table_lineage(
+                        table_chain=table_chain,
+                        from_fqn=from_fqn,
+                        to_fqn=to_fqn,
+                    )
+                    hops_map.setdefault(key, []).extend(temp_hops)
+            if current_fqns:
+                from_node = graph.nodes[node]
+                table_chain = [str(node).replace(f"{DEFAULT_SCHEMA_NAME}.", "")]
+    return hops_map
+
+
+@calculate_execution_time_generator(context="GetLineageByGraph")
 def get_lineage_by_graph(
     graph: Optional[DiGraph],
     metadata: OpenMetadata,
@@ -1081,10 +1273,14 @@ def get_lineage_by_graph(
     # Extract each component as an independent subgraph and process paths
     for component in components:
         subtree = graph.subgraph(component).copy()
-        for path in _get_paths_from_subtree(subtree):
-            yield from _process_sequence(path, subtree, metadata)
+        paths = _get_paths_from_subtree(subtree)
+        hops_map = _collect_temp_lineage_hops(paths, subtree)
+        seen_pairs = set()
+        for path in paths:
+            yield from _process_sequence(path, subtree, metadata, hops_map, seen_pairs)
 
 
+@calculate_execution_time_generator(context="GetLineageByProcedureGraph")
 def get_lineage_by_procedure_graph(
     procedure_graph_map: Optional[Dict],
     metadata: OpenMetadata,

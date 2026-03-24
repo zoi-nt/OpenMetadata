@@ -31,6 +31,7 @@ import org.openmetadata.schema.utils.JsonUtils;
 import org.openmetadata.service.Entity;
 import org.openmetadata.service.resources.query.QueryResource;
 import org.openmetadata.service.util.EntityUtil;
+import org.openmetadata.service.util.EntityUtil.RelationIncludes;
 import org.openmetadata.service.util.FullyQualifiedName;
 import org.openmetadata.service.util.RestUtil;
 
@@ -66,7 +67,7 @@ public class QueryRepository extends EntityRepository<Query> {
   }
 
   @Override
-  public void setFields(Query entity, EntityUtil.Fields fields) {
+  public void setFields(Query entity, EntityUtil.Fields fields, RelationIncludes relationIncludes) {
     entity.setQueryUsedIn(
         fields.contains(QUERY_USED_IN_FIELD) ? getQueryUsage(entity) : entity.getQueryUsedIn());
     entity.withUsers(fields.contains("users") ? getQueryUsers(entity) : entity.getUsers());
@@ -205,14 +206,27 @@ public class QueryRepository extends EntityRepository<Query> {
   }
 
   @Override
-  public void storeEntity(Query queryEntity, boolean update) {
-    List<EntityReference> queryUsage = queryEntity.getQueryUsedIn();
-    List<EntityReference> queryUsers = queryEntity.getUsers();
-    queryEntity.withQueryUsedIn(null).withUsers(null);
-    store(queryEntity, update);
+  protected List<String> getFieldsStrippedFromStorageJson() {
+    return List.of("queryUsedIn", "users");
+  }
 
-    // Restore relationships
-    queryEntity.withQueryUsedIn(queryUsage).withUsers(queryUsers);
+  @Override
+  public void storeEntity(Query queryEntity, boolean update) {
+    store(queryEntity, update);
+  }
+
+  @Override
+  public void storeEntities(List<Query> entities) {
+    storeMany(entities);
+  }
+
+  @Override
+  protected void clearEntitySpecificRelationshipsForMany(List<Query> entities) {
+    if (entities.isEmpty()) return;
+    List<UUID> ids = entities.stream().map(Query::getId).toList();
+    deleteToMany(ids, Entity.QUERY, Relationship.USES, Entity.USER);
+    deleteToMany(ids, entityType, Relationship.CONTAINS, null);
+    deleteFromMany(ids, Entity.QUERY, Relationship.MENTIONED_IN, null);
   }
 
   @Override
@@ -364,39 +378,57 @@ public class QueryRepository extends EntityRepository<Query> {
     @Transaction
     @Override
     public void entitySpecificUpdate(boolean consolidatingChanges) {
-      updateFromRelationships(
+      compareAndUpdate(
           "users",
-          USER,
-          original.getUsers(),
-          updated.getUsers() == null ? new ArrayList<>() : updated.getUsers(),
-          Relationship.USES,
-          Entity.QUERY,
-          original.getId());
-      List<EntityReference> added = new ArrayList<>();
-      List<EntityReference> deleted = new ArrayList<>();
-      recordListChange(
+          () -> {
+            updateFromRelationships(
+                "users",
+                USER,
+                original.getUsers(),
+                updated.getUsers() == null ? new ArrayList<>() : updated.getUsers(),
+                Relationship.USES,
+                Entity.QUERY,
+                original.getId());
+          });
+      compareAndUpdate(
           "queryUsedIn",
-          original.getQueryUsedIn(),
-          updated.getQueryUsedIn(),
-          added,
-          deleted,
-          EntityUtil.entityReferenceMatch);
-      // Store processed Lineage
-      recordChange(
-          "processedLineage", original.getProcessedLineage(), updated.getProcessedLineage());
-      // Store Query Used in Relation
-      recordChange("usedBy", original.getUsedBy(), updated.getUsedBy(), true);
-      storeQueryUsedIn(updated.getId(), added, deleted);
-      // Query is a required field. Cannot be removed.
-      if (updated.getQuery() != null) {
-        String originalChecksum = EntityUtil.hash(original.getQuery());
-        String updatedChecksum = EntityUtil.hash(updated.getQuery());
-        if (!originalChecksum.equals(updatedChecksum)) {
-          updated.setChecksum(updatedChecksum);
-          recordChange("query", original.getQuery(), updated.getQuery());
-          recordChange("checksum", original.getChecksum(), updated.getChecksum());
-        }
-      }
+          () -> {
+            List<EntityReference> added = new ArrayList<>();
+            List<EntityReference> deleted = new ArrayList<>();
+            recordListChange(
+                "queryUsedIn",
+                original.getQueryUsedIn(),
+                updated.getQueryUsedIn(),
+                added,
+                deleted,
+                EntityUtil.entityReferenceMatch);
+            storeQueryUsedIn(updated.getId(), added, deleted);
+          });
+      compareAndUpdate(
+          "processedLineage",
+          () -> {
+            recordChange(
+                "processedLineage", original.getProcessedLineage(), updated.getProcessedLineage());
+          });
+      compareAndUpdate(
+          "usedBy",
+          () -> {
+            recordChange("usedBy", original.getUsedBy(), updated.getUsedBy(), true);
+          });
+      compareAndUpdate(
+          "query",
+          () -> {
+            // Query is a required field. Cannot be removed.
+            if (updated.getQuery() != null) {
+              String originalChecksum = EntityUtil.hash(original.getQuery());
+              String updatedChecksum = EntityUtil.hash(updated.getQuery());
+              if (!originalChecksum.equals(updatedChecksum)) {
+                updated.setChecksum(updatedChecksum);
+                recordChange("query", original.getQuery(), updated.getQuery());
+                recordChange("checksum", original.getChecksum(), updated.getChecksum());
+              }
+            }
+          });
     }
   }
 }

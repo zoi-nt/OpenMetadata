@@ -12,6 +12,7 @@
  */
 import { isEmpty } from 'lodash';
 import React from 'react';
+import { TabProps } from '../components/common/TabsLabel/TabsLabel.interface';
 import { CommonWidgets } from '../components/DataAssets/CommonWidgets/CommonWidgets';
 import { DomainLabelV2 } from '../components/DataAssets/DomainLabelV2/DomainLabelV2';
 import { OwnerLabelV2 } from '../components/DataAssets/OwnerLabelV2/OwnerLabelV2';
@@ -22,10 +23,11 @@ import {
 } from '../constants/CustomizeWidgets.constants';
 import { queryFilterToRemoveSomeClassification } from '../constants/Tag.constants';
 import { DetailPageWidgetKeys } from '../enums/CustomizeDetailPage.enum';
-import { EntityTabs, EntityType } from '../enums/entity.enum';
+import { EntityTabs, EntityType, TabSpecificField } from '../enums/entity.enum';
 import { SearchIndex } from '../enums/search.enum';
 import { Tag } from '../generated/entity/classification/tag';
 import { Tab } from '../generated/system/ui/uiCustomization';
+import { TagLabel } from '../generated/type/tagLabel';
 import { WidgetConfig } from '../pages/CustomizablePage/CustomizablePage.interface';
 import { searchQuery } from '../rest/searchAPI';
 import { getTabLabelFromId } from './CustomizePage/CustomizePageUtils';
@@ -68,18 +70,24 @@ class TagClassBase {
     if (emptyQueryFilter) {
       // If emptyQueryFilter is true, only use the disabled filter
       mergedQueryFilter = disabledFilter;
-    } else if (!isEmpty(queryFilterToRemoveSomeClassification)) {
-      // Merge both filters: disabled:false (must) + classification exclusions (must_not)
-      mergedQueryFilter = {
-        query: {
-          bool: {
-            must: disabledFilter.query.bool.must,
-            must_not: queryFilterToRemoveSomeClassification.query.bool.must_not,
-          },
-        },
-      };
     } else {
-      mergedQueryFilter = disabledFilter;
+      const hasClassificationFilter = !isEmpty(
+        queryFilterToRemoveSomeClassification
+      );
+      if (hasClassificationFilter) {
+        // Merge both filters: disabled:false (must) + classification exclusions (must_not)
+        mergedQueryFilter = {
+          query: {
+            bool: {
+              must: disabledFilter.query.bool.must,
+              must_not:
+                queryFilterToRemoveSomeClassification.query.bool.must_not,
+            },
+          },
+        };
+      } else {
+        mergedQueryFilter = disabledFilter;
+      }
     }
 
     const res = await searchQuery({
@@ -235,6 +243,39 @@ class TagClassBase {
       updatedBy: 'admin',
       href: '',
     } as Tag;
+  }
+  public getAutoClassificationComponent = (
+    _isClassification: boolean
+  ): React.ReactElement | null => {
+    return null;
+  };
+
+  public getRecognizerFeedbackPopup(
+    _tagLabel: TagLabel,
+    _entityFqn: string,
+    _children: React.ReactElement
+  ): React.ReactElement | null {
+    return null;
+  }
+
+  public getClassificationReviewerWidget(): React.ReactElement | null {
+    return null;
+  }
+
+  public getClassificationFields(): string[] {
+    return [
+      TabSpecificField.OWNERS,
+      TabSpecificField.USAGE_COUNT,
+      TabSpecificField.TERM_COUNT,
+      TabSpecificField.DOMAINS,
+    ];
+  }
+
+  public getAdditionalTagDetailPageTabs(
+    _tag: Tag,
+    _activeTab: string
+  ): TabProps[] {
+    return [];
   }
 }
 

@@ -37,7 +37,15 @@ import {
 import Form, { RuleObject } from 'antd/lib/form';
 import { AxiosError } from 'axios';
 import cryptoRandomString from 'crypto-random-string-with-promisify-polyfill';
-import { isEmpty, isEqual, isUndefined, map, startCase, uniqBy } from 'lodash';
+import {
+  isEmpty,
+  isEqual,
+  isUndefined,
+  map,
+  omitBy,
+  startCase,
+  uniqBy,
+} from 'lodash';
 import { Fragment } from 'react';
 import { ReactComponent as AlertIcon } from '../../assets/svg/alert.svg';
 import { ReactComponent as AllActivityIcon } from '../../assets/svg/all-activity.svg';
@@ -73,11 +81,13 @@ import {
   TypedEvent,
 } from '../../generated/events/api/typedEvent';
 import {
+  Destination,
   EventFilterRule,
   HTTPMethod,
   InputType,
   SubscriptionCategory,
   SubscriptionType,
+  Type,
   Webhook,
 } from '../../generated/events/eventSubscription';
 import { Status as DestinationStatus } from '../../generated/events/testDestinationStatus';
@@ -149,17 +159,13 @@ export const listLengthValidator =
   <T,>(name: string, minLengthRequired = 1) =>
   async (_: RuleObject, list: T[]) => {
     if (!list || list.length < minLengthRequired) {
-      return Promise.reject(
-        new Error(
-          t('message.length-validator-error', {
-            length: minLengthRequired,
-            field: name,
-          })
-        )
+      throw new Error(
+        t('message.length-validator-error', {
+          length: minLengthRequired,
+          field: name,
+        })
       );
     }
-
-    return Promise.resolve();
   };
 
 export const getAlertActionTypeDisplayName = (
@@ -217,8 +223,6 @@ export const searchEntity = async ({
       queryFilter,
       searchIndex,
     });
-    const searchIndexEntityTypeMapping =
-      searchClassBase.getSearchIndexEntityTypeMapping();
 
     return uniqBy(
       response.hits.hits.map((d) => {
@@ -233,7 +237,7 @@ export const searchEntity = async ({
         const value = setSourceAsValue
           ? JSON.stringify({
               ...d._source,
-              type: searchIndexEntityTypeMapping[d._index],
+              type: d._source.entityType,
             })
           : d._source.fullyQualifiedName ?? '';
 
@@ -438,23 +442,218 @@ export const getDestinationConfigField = (
                   }
                   key={`advanced-configuration-${fieldName}`}>
                   <Row align="middle" gutter={[8, 8]}>
-                    <Col data-testid="secret-key" span={24}>
+                    <Col data-testid="auth-type" span={24}>
                       <Form.Item
                         label={
                           <Typography.Text>{`${t(
-                            'label.secret-key'
+                            'label.authentication-type'
                           )}:`}</Typography.Text>
                         }
                         labelCol={{ span: 24 }}
-                        name={[fieldName, 'config', 'secretKey']}>
-                        <Input.Password
-                          data-testid={`secret-key-input-${fieldName}`}
-                          placeholder={`${t('label.secret-key')} (${t(
-                            'label.optional'
-                          )})`}
+                        name={[fieldName, 'config', 'authType', 'type']}>
+                        <Select
+                          className="w-full"
+                          data-testid={`auth-type-select-${fieldName}`}
+                          options={[
+                            {
+                              label: t('label.no-authentication'),
+                              value: Type.None,
+                            },
+                            {
+                              label: t('label.bearer-hmac-signature'),
+                              value: Type.Bearer,
+                            },
+                            {
+                              label: t('label.oauth2-client-credential-plural'),
+                              value: Type.Oauth2,
+                            },
+                          ]}
+                          placeholder={t('label.authentication-type')}
                         />
                       </Form.Item>
                     </Col>
+                    <Form.Item
+                      noStyle
+                      shouldUpdate={(prevValues, currentValues) => {
+                        const prevType =
+                          prevValues?.destinations?.[fieldName]?.config
+                            ?.authType?.type;
+                        const currentType =
+                          currentValues?.destinations?.[fieldName]?.config
+                            ?.authType?.type;
+
+                        return prevType !== currentType;
+                      }}>
+                      {({ getFieldValue }) => {
+                        const selectedAuthType = getFieldValue([
+                          'destinations',
+                          fieldName,
+                          'config',
+                          'authType',
+                          'type',
+                        ]);
+
+                        if (selectedAuthType === Type.Bearer) {
+                          return (
+                            <Col data-testid="secret-key" span={24}>
+                              <Form.Item
+                                label={
+                                  <Typography.Text>{`${t(
+                                    'label.secret-key'
+                                  )}:`}</Typography.Text>
+                                }
+                                labelCol={{ span: 24 }}
+                                name={[
+                                  fieldName,
+                                  'config',
+                                  'authType',
+                                  'secretKey',
+                                ]}
+                                rules={[
+                                  {
+                                    required: true,
+                                    message: t(
+                                      'message.field-text-is-required',
+                                      {
+                                        fieldText: t('label.secret-key'),
+                                      }
+                                    ),
+                                  },
+                                ]}>
+                                <Input.Password
+                                  data-testid={`secret-key-input-${fieldName}`}
+                                  placeholder={t('label.secret-key')}
+                                />
+                              </Form.Item>
+                            </Col>
+                          );
+                        }
+
+                        if (selectedAuthType === Type.Oauth2) {
+                          return (
+                            <>
+                              <Col span={24}>
+                                <Form.Item
+                                  label={
+                                    <Typography.Text>{`${t(
+                                      'label.token-url'
+                                    )}:`}</Typography.Text>
+                                  }
+                                  labelCol={{ span: 24 }}
+                                  name={[
+                                    fieldName,
+                                    'config',
+                                    'authType',
+                                    'tokenUrl',
+                                  ]}
+                                  rules={[
+                                    {
+                                      required: true,
+                                      message: t(
+                                        'message.field-text-is-required',
+                                        {
+                                          fieldText: t('label.token-url'),
+                                        }
+                                      ),
+                                    },
+                                  ]}>
+                                  <Input
+                                    data-testid={`token-url-input-${fieldName}`}
+                                    placeholder="https://auth.example.com/oauth/token"
+                                  />
+                                </Form.Item>
+                              </Col>
+                              <Col span={12}>
+                                <Form.Item
+                                  label={
+                                    <Typography.Text>{`${t(
+                                      'label.client-id'
+                                    )}:`}</Typography.Text>
+                                  }
+                                  labelCol={{ span: 24 }}
+                                  name={[
+                                    fieldName,
+                                    'config',
+                                    'authType',
+                                    'clientId',
+                                  ]}
+                                  rules={[
+                                    {
+                                      required: true,
+                                      message: t(
+                                        'message.field-text-is-required',
+                                        {
+                                          fieldText: t('label.client-id'),
+                                        }
+                                      ),
+                                    },
+                                  ]}>
+                                  <Input.Password
+                                    data-testid={`client-id-input-${fieldName}`}
+                                    placeholder={t('label.client-id')}
+                                  />
+                                </Form.Item>
+                              </Col>
+                              <Col span={12}>
+                                <Form.Item
+                                  label={
+                                    <Typography.Text>{`${t(
+                                      'label.client-secret'
+                                    )}:`}</Typography.Text>
+                                  }
+                                  labelCol={{ span: 24 }}
+                                  name={[
+                                    fieldName,
+                                    'config',
+                                    'authType',
+                                    'clientSecret',
+                                  ]}
+                                  rules={[
+                                    {
+                                      required: true,
+                                      message: t(
+                                        'message.field-text-is-required',
+                                        {
+                                          fieldText: t('label.client-secret'),
+                                        }
+                                      ),
+                                    },
+                                  ]}>
+                                  <Input.Password
+                                    data-testid={`client-secret-input-${fieldName}`}
+                                    placeholder={t('label.client-secret')}
+                                  />
+                                </Form.Item>
+                              </Col>
+                              <Col span={24}>
+                                <Form.Item
+                                  label={
+                                    <Typography.Text>{`${t(
+                                      'label.scope'
+                                    )}:`}</Typography.Text>
+                                  }
+                                  labelCol={{ span: 24 }}
+                                  name={[
+                                    fieldName,
+                                    'config',
+                                    'authType',
+                                    'scope',
+                                  ]}>
+                                  <Input
+                                    data-testid={`scope-input-${fieldName}`}
+                                    placeholder={`${t('label.scope')} (${t(
+                                      'label.optional'
+                                    )})`}
+                                  />
+                                </Form.Item>
+                              </Col>
+                            </>
+                          );
+                        }
+
+                        return null;
+                      }}
+                    </Form.Item>
                     <Col span={24}>
                       <Form.List name={[fieldName, 'config', 'headers']}>
                         {(fields, { add, remove }, { errors }) => (
@@ -472,6 +671,7 @@ export const getDestinationConfigField = (
                                 <Col>
                                   <Col>
                                     <Button
+                                      data-testid={`add-header-button-${fieldName}`}
                                       icon={<PlusOutlined />}
                                       type="primary"
                                       onClick={() => add({})}
@@ -562,6 +762,7 @@ export const getDestinationConfigField = (
                                 <Col>
                                   <Col>
                                     <Button
+                                      data-testid={`add-query-param-button-${fieldName}`}
                                       icon={<PlusOutlined />}
                                       type="primary"
                                       onClick={() => add({})}
@@ -1208,12 +1409,28 @@ export const getConfigQueryParamsArrayFromObject = (
         value,
       }));
 
+/**
+ * @description Normalizes destination config for comparison by converting headers and queryParams to array format
+ */
+export const normalizeDestinationConfig = (config?: Destination['config']) =>
+  omitBy(
+    {
+      ...config,
+      headers: getConfigHeaderArrayFromObject(config?.headers),
+      queryParams: getConfigQueryParamsArrayFromObject(config?.queryParams),
+    },
+    isUndefined
+  );
+
 export const getFormattedDestinations = (
   destinations?: ModifiedDestination[]
 ) => {
   const formattedDestinations = destinations?.map((destination) => {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { destinationType, config, ...otherData } = destination;
+    const {
+      destinationType: _destinationType,
+      config,
+      ...otherData
+    } = destination;
 
     const headers = getConfigHeaderObjectFromArray(config?.headers);
     const queryParams = getConfigQueryParamsObjectFromArray(
@@ -1222,60 +1439,63 @@ export const getFormattedDestinations = (
 
     return {
       ...otherData,
-      config: {
-        ...config,
-        headers: isEmpty(headers) ? undefined : headers,
-        queryParams: isEmpty(queryParams) ? undefined : queryParams,
-      },
+      config: omitBy(
+        {
+          ...config,
+          headers: isEmpty(headers) ? undefined : headers,
+          queryParams: isEmpty(queryParams) ? undefined : queryParams,
+        },
+        isUndefined
+      ),
     };
   });
 
   return formattedDestinations;
 };
 
+// Destination category exclusions by entity type
+const DESTINATION_CATEGORY_EXCLUDES: Record<string, SubscriptionCategory[]> = {
+  // Default: exclude Assignees and Mentions for all non-thread entities
+  __default__: [SubscriptionCategory.Assignees, SubscriptionCategory.Mentions],
+  // Thread-specific exclusions
+  task: [
+    SubscriptionCategory.Followers,
+    SubscriptionCategory.Admins,
+    SubscriptionCategory.Users,
+    SubscriptionCategory.Teams,
+  ],
+  conversation: [
+    SubscriptionCategory.Followers,
+    SubscriptionCategory.Admins,
+    SubscriptionCategory.Users,
+    SubscriptionCategory.Teams,
+    SubscriptionCategory.Assignees,
+  ],
+  announcement: [SubscriptionCategory.Assignees],
+};
+
 export const getFilteredDestinationOptions = (
   key: keyof typeof DESTINATION_SOURCE_ITEMS,
   selectedSource: string
 ) => {
-  // Get options based on destination type key ("Internal" OR "External").
-  const newOptions = DESTINATION_SOURCE_ITEMS[key];
+  const options = DESTINATION_SOURCE_ITEMS[key];
+  const isExternalDestination = !isEqual(
+    key,
+    DESTINATION_DROPDOWN_TABS.internal
+  );
 
-  const isInternalOptions = isEqual(key, DESTINATION_DROPDOWN_TABS.internal);
+  if (isExternalDestination) {
+    return options;
+  }
 
-  // Logic to filter the options based on destination type and selected source.
-  const filteredOptions = newOptions.filter((option) => {
-    // If the destination type is external, always show all options.
-    if (!isInternalOptions) {
-      return true;
-    }
+  const excludedCategories =
+    DESTINATION_CATEGORY_EXCLUDES[selectedSource] ||
+    DESTINATION_CATEGORY_EXCLUDES.__default__;
 
-    // Logic to filter options for destination type "Internal"
-
-    // Show all options except "Assignees" and "Mentions" for all sources.
-    let shouldShowOption =
-      option.value !== SubscriptionCategory.Assignees &&
-      option.value !== SubscriptionCategory.Mentions;
-
-    // Only show "Owners" and "Assignees" options for "Task" source.
-    if (selectedSource === 'task') {
-      shouldShowOption = [
-        SubscriptionCategory.Owners,
-        SubscriptionCategory.Assignees,
-      ].includes(option.value as SubscriptionCategory);
-    }
-
-    // Only show "Owners" and "Mentions" options for "Conversation" source.
-    if (selectedSource === 'conversation') {
-      shouldShowOption = [
-        SubscriptionCategory.Owners,
-        SubscriptionCategory.Mentions,
-      ].includes(option.value as SubscriptionCategory);
-    }
-
-    return shouldShowOption;
-  });
-
-  return filteredOptions;
+  return options.filter(
+    (option) =>
+      !excludedCategories.includes(option.value as SubscriptionCategory)
+  );
 };
 
 export const getSourceOptionsFromResourceList = (
@@ -1415,14 +1635,12 @@ export const getAlertExtraInfo = (
   if (alertEventCountsLoading) {
     return (
       <>
-        {Array(3)
-          .fill(null)
-          .map((_, id) => (
-            <Fragment key={id}>
-              <Divider className="self-center" type="vertical" />
-              <Skeleton.Button active className="extra-info-skeleton" />
-            </Fragment>
-          ))}
+        {new Array(3).fill(null).map((_, id) => (
+          <Fragment key={id}>
+            <Divider className="self-center" type="vertical" />
+            <Skeleton.Button active className="extra-info-skeleton" />
+          </Fragment>
+        ))}
       </>
     );
   }

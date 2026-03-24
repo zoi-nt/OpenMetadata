@@ -11,7 +11,7 @@
  *  limitations under the License.
  */
 
-import { Tooltip } from '@mui/material';
+import { Tooltip, TooltipTrigger } from '@openmetadata/ui-core-components';
 import { Button, Typography } from 'antd';
 import { capitalize } from 'lodash';
 import React, { useMemo, useState } from 'react';
@@ -25,7 +25,10 @@ import { EntityType } from '../../../../enums/entity.enum';
 import { EntityReference } from '../../../../generated/entity/type';
 import { getServiceLogo } from '../../../../utils/CommonUtils';
 import { getUpstreamDownstreamNodesEdges } from '../../../../utils/EntityLineageUtils';
-import { getEntityLinkFromType } from '../../../../utils/EntityUtils';
+import {
+  getEntityLinkFromType,
+  getEntityName,
+} from '../../../../utils/EntityUtils';
 import { FormattedDatabaseServiceType } from '../../../../utils/EntityUtils.interface';
 import { getTruncatedPath } from '../../../../utils/Lineage/LineageUtils';
 import searchClassBase from '../../../../utils/SearchClassBase';
@@ -133,14 +136,11 @@ const LineageTabContent: React.FC<LineageTabContentProps> = ({
     const searchLower = searchText.toLowerCase();
 
     return lineageItems.filter((item) => {
-      const entityName = item.entity.name?.toLowerCase() || '';
-      const entityDisplayName = item.entity.displayName?.toLowerCase() || '';
+      const entityName = getEntityName(item.entity)?.toLowerCase() || '';
       const entityFqn = item.entity.fullyQualifiedName?.toLowerCase() || '';
 
       return (
-        entityName.includes(searchLower) ||
-        entityDisplayName.includes(searchLower) ||
-        entityFqn.includes(searchLower)
+        entityName.includes(searchLower) || entityFqn.includes(searchLower)
       );
     });
   }, [lineageItems, searchText]);
@@ -241,29 +241,23 @@ const LineageTabContent: React.FC<LineageTabContentProps> = ({
                   </div>
                   <div className="lineage-item-direction">
                     {item.direction === 'upstream' ? (
-                      <Tooltip
-                        arrow
-                        placement="top"
-                        title={t('label.upstream')}>
-                        <span>
+                      <Tooltip placement="top" title={t('label.upstream')}>
+                        <TooltipTrigger>
                           <UpstreamIcon height={18} width={18} />
-                        </span>
+                        </TooltipTrigger>
                       </Tooltip>
                     ) : (
-                      <Tooltip
-                        arrow
-                        placement="top"
-                        title={t('label.downstream')}>
-                        <span>
+                      <Tooltip placement="top" title={t('label.downstream')}>
+                        <TooltipTrigger>
                           <DownstreamIcon height={18} width={18} />
-                        </span>
+                        </TooltipTrigger>
                       </Tooltip>
                     )}
                   </div>
                 </div>
                 <div className="lineage-card-content">
                   <Typography.Text className="item-name-text">
-                    {item.entity.displayName || item.entity.name}
+                    {getEntityName(item.entity)}
                   </Typography.Text>
                   <div className="d-flex align-items-center gap-1 lineage-info-container">
                     {item.entity.entityType && (

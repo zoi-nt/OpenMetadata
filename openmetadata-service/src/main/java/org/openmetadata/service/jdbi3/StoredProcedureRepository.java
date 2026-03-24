@@ -2,10 +2,10 @@ package org.openmetadata.service.jdbi3;
 
 import static org.openmetadata.schema.type.Include.ALL;
 import static org.openmetadata.service.Entity.DATABASE_SCHEMA;
-import static org.openmetadata.service.Entity.FIELD_FOLLOWERS;
 import static org.openmetadata.service.Entity.FIELD_SERVICE;
 import static org.openmetadata.service.Entity.STORED_PROCEDURE;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -22,6 +22,7 @@ import org.openmetadata.schema.type.change.ChangeSource;
 import org.openmetadata.service.Entity;
 import org.openmetadata.service.resources.databases.StoredProcedureResource;
 import org.openmetadata.service.util.EntityUtil;
+import org.openmetadata.service.util.EntityUtil.RelationIncludes;
 import org.openmetadata.service.util.FullyQualifiedName;
 
 public class StoredProcedureRepository extends EntityRepository<StoredProcedure> {
@@ -49,7 +50,8 @@ public class StoredProcedureRepository extends EntityRepository<StoredProcedure>
 
   @Override
   public void prepare(StoredProcedure storedProcedure, boolean update) {
-    DatabaseSchema schema = Entity.getEntity(storedProcedure.getDatabaseSchema(), "", ALL);
+    var schema =
+        (DatabaseSchema) getCachedParentOrLoad(storedProcedure.getDatabaseSchema(), "", ALL);
     storedProcedure
         .withDatabaseSchema(schema.getEntityReference())
         .withDatabase(schema.getDatabase())
@@ -58,12 +60,25 @@ public class StoredProcedureRepository extends EntityRepository<StoredProcedure>
   }
 
   @Override
+  protected List<String> getFieldsStrippedFromStorageJson() {
+    return List.of("service");
+  }
+
+  @Override
   public void storeEntity(StoredProcedure storedProcedure, boolean update) {
-    // Relationships and fields such as service are derived and not stored as part of json
-    EntityReference service = storedProcedure.getService();
-    storedProcedure.withService(null);
     store(storedProcedure, update);
-    storedProcedure.withService(service);
+  }
+
+  @Override
+  public void storeEntities(List<StoredProcedure> storedProcedures) {
+    storeMany(storedProcedures);
+  }
+
+  @Override
+  protected void clearEntitySpecificRelationshipsForMany(List<StoredProcedure> entities) {
+    if (entities.isEmpty()) return;
+    List<UUID> ids = entities.stream().map(StoredProcedure::getId).toList();
+    deleteToMany(ids, Entity.STORED_PROCEDURE, Relationship.CONTAINS, Entity.DATABASE_SCHEMA);
   }
 
   @Override
@@ -74,6 +89,25 @@ public class StoredProcedureRepository extends EntityRepository<StoredProcedure>
         DATABASE_SCHEMA,
         STORED_PROCEDURE,
         Relationship.CONTAINS);
+  }
+
+  @Override
+  protected void storeEntitySpecificRelationshipsForMany(List<StoredProcedure> entities) {
+    List<CollectionDAO.EntityRelationshipObject> relationships = new ArrayList<>();
+    for (StoredProcedure storedProcedure : entities) {
+      if (storedProcedure.getDatabaseSchema() == null
+          || storedProcedure.getDatabaseSchema().getId() == null) {
+        continue;
+      }
+      relationships.add(
+          newRelationship(
+              storedProcedure.getDatabaseSchema().getId(),
+              storedProcedure.getId(),
+              DATABASE_SCHEMA,
+              STORED_PROCEDURE,
+              Relationship.CONTAINS));
+    }
+    bulkInsertRelationships(relationships);
   }
 
   @Override
@@ -89,18 +123,16 @@ public class StoredProcedureRepository extends EntityRepository<StoredProcedure>
 
   @Override
   public void setInheritedFields(StoredProcedure storedProcedure, EntityUtil.Fields fields) {
-    DatabaseSchema schema =
-        Entity.getEntity(
-            DATABASE_SCHEMA, storedProcedure.getDatabaseSchema().getId(), "owners,domains", ALL);
-    inheritOwners(storedProcedure, fields, schema);
-    inheritDomains(storedProcedure, fields, schema);
+    hydrateParentReferencesForInheritance(List.of(storedProcedure), fields);
+    super.setInheritedFields(storedProcedure, fields);
   }
 
   @Override
-  public void setFields(StoredProcedure storedProcedure, EntityUtil.Fields fields) {
+  public void setFields(
+      StoredProcedure storedProcedure,
+      EntityUtil.Fields fields,
+      RelationIncludes relationIncludes) {
     setDefaultFields(storedProcedure);
-    storedProcedure.setFollowers(
-        fields.contains(FIELD_FOLLOWERS) ? getFollowers(storedProcedure) : null);
   }
 
   @Override
@@ -121,35 +153,58 @@ public class StoredProcedureRepository extends EntityRepository<StoredProcedure>
         || fields.contains("database")
         || fields.contains("service")) {
 
-      // First, collect all unique schema IDs
-      Map<UUID, EntityReference> schemaMap = new HashMap<>();
-      for (StoredProcedure sp : storedProcedures) {
-        EntityReference schemaRef = getContainer(sp.getId());
-        if (schemaRef != null) {
-          schemaMap.put(schemaRef.getId(), schemaRef);
+      Map<UUID, EntityReference> schemaRefs =
+          batchFetchContainers(storedProcedures, DATABASE_SCHEMA, Include.ALL);
+      if (!schemaRefs.isEmpty()) {
+        List<UUID> schemaIds =
+            schemaRefs.values().stream().map(EntityReference::getId).distinct().toList();
+        var schemaRepository =
+            (DatabaseSchemaRepository) Entity.getEntityRepository(DATABASE_SCHEMA);
+        List<DatabaseSchema> schemas =
+            schemaRepository.getDao().findEntitiesByIds(new ArrayList<>(schemaIds), Include.ALL);
+        schemaRepository.setFieldsInBulk(EntityUtil.Fields.EMPTY_FIELDS, schemas);
+        Map<UUID, DatabaseSchema> schemaById = new HashMap<>();
+        for (DatabaseSchema schema : schemas) {
+          schemaById.put(schema.getId(), schema);
         }
-      }
 
-      // Batch fetch all database schemas with their service info
-      Map<UUID, DatabaseSchema> schemas = new HashMap<>();
-      for (UUID schemaId : schemaMap.keySet()) {
-        DatabaseSchema schema = Entity.getEntity(DATABASE_SCHEMA, schemaId, "", ALL);
-        schemas.put(schemaId, schema);
-      }
-
-      // Apply all the fetched data to stored procedures
-      for (StoredProcedure sp : storedProcedures) {
-        EntityReference schemaRef = getContainer(sp.getId());
-        if (schemaRef != null && schemas.containsKey(schemaRef.getId())) {
-          DatabaseSchema schema = schemas.get(schemaRef.getId());
-          sp.withDatabaseSchema(schemaRef)
-              .withDatabase(schema.getDatabase())
-              .withService(schema.getService());
+        for (StoredProcedure sp : storedProcedures) {
+          EntityReference schemaRef = schemaRefs.get(sp.getId());
+          if (schemaRef == null) {
+            continue;
+          }
+          DatabaseSchema schema = schemaById.get(schemaRef.getId());
+          if (schema != null) {
+            sp.withDatabaseSchema(schemaRef)
+                .withDatabase(schema.getDatabase())
+                .withService(schema.getService());
+          }
         }
       }
     }
 
     super.setFieldsInBulk(fields, storedProcedures);
+  }
+
+  @Override
+  protected void setInheritedFields(List<StoredProcedure> entities, EntityUtil.Fields fields) {
+    hydrateParentReferencesForInheritance(entities, fields);
+    super.setInheritedFields(entities, fields);
+  }
+
+  @Override
+  protected String getInheritableFields() {
+    return "owners,domains";
+  }
+
+  @Override
+  protected void applyInheritance(
+      StoredProcedure entity, EntityUtil.Fields fields, EntityInterface parent) {
+    if (!(parent instanceof DatabaseSchema schema)) {
+      return;
+    }
+    inheritOwners(entity, fields, schema);
+    inheritDomains(entity, fields, schema);
   }
 
   private void setDefaultFields(StoredProcedure storedProcedure) {
@@ -161,6 +216,33 @@ public class StoredProcedureRepository extends EntityRepository<StoredProcedure>
         .withService(schema.getService());
   }
 
+  private void hydrateParentReferencesForInheritance(
+      List<StoredProcedure> storedProcedures, EntityUtil.Fields fields) {
+    if (storedProcedures == null || storedProcedures.isEmpty()) {
+      return;
+    }
+    boolean needsOwners = fields.contains(Entity.FIELD_OWNERS);
+    boolean needsDomains = fields.contains("domains");
+    if (!needsOwners && !needsDomains) {
+      return;
+    }
+
+    List<StoredProcedure> missingParentRefs =
+        storedProcedures.stream().filter(sp -> sp.getDatabaseSchema() == null).toList();
+    if (missingParentRefs.isEmpty()) {
+      return;
+    }
+
+    Map<UUID, EntityReference> schemaRefs =
+        batchFetchContainers(missingParentRefs, DATABASE_SCHEMA, ALL);
+    for (StoredProcedure storedProcedure : missingParentRefs) {
+      EntityReference schemaRef = schemaRefs.get(storedProcedure.getId());
+      if (schemaRef != null) {
+        storedProcedure.withDatabaseSchema(schemaRef);
+      }
+    }
+  }
+
   @Override
   public EntityRepository<StoredProcedure>.EntityUpdater getUpdater(
       StoredProcedure original,
@@ -168,6 +250,11 @@ public class StoredProcedureRepository extends EntityRepository<StoredProcedure>
       Operation operation,
       ChangeSource changeSource) {
     return new StoredProcedureUpdater(original, updated, operation);
+  }
+
+  @Override
+  protected EntityReference getParentReference(StoredProcedure entity) {
+    return entity.getDatabaseSchema();
   }
 
   @Override
@@ -196,24 +283,50 @@ public class StoredProcedureRepository extends EntityRepository<StoredProcedure>
     @Transaction
     @Override
     public void entitySpecificUpdate(boolean consolidatingChanges) {
-      // storedProcedureCode is a required field. Cannot be null.
-      if (updated.getStoredProcedureCode() != null) {
-        recordChange(
-            "storedProcedureCode",
-            original.getStoredProcedureCode(),
-            updated.getStoredProcedureCode());
-      }
-      if (updated.getStoredProcedureType() != null) {
-        recordChange(
-            "storedProcedureType",
-            original.getStoredProcedureType(),
-            updated.getStoredProcedureType());
-      }
-      updateProcessedLineage(original, updated);
-      recordChange(
-          "processedLineage", original.getProcessedLineage(), updated.getProcessedLineage());
-      recordChange("sourceUrl", original.getSourceUrl(), updated.getSourceUrl());
-      recordChange("sourceHash", original.getSourceHash(), updated.getSourceHash());
+      compareAndUpdate(
+          "storedProcedureCode",
+          () -> {
+            // storedProcedureCode is a required field. Cannot be null.
+            if (updated.getStoredProcedureCode() != null) {
+              recordChange(
+                  "storedProcedureCode",
+                  original.getStoredProcedureCode(),
+                  updated.getStoredProcedureCode());
+            }
+          });
+      compareAndUpdate(
+          "storedProcedureType",
+          () -> {
+            if (updated.getStoredProcedureType() != null) {
+              recordChange(
+                  "storedProcedureType",
+                  original.getStoredProcedureType(),
+                  updated.getStoredProcedureType());
+            }
+          });
+      compareAndUpdate(
+          "processedLineage",
+          () -> {
+            updateProcessedLineage(original, updated);
+            recordChange(
+                "processedLineage", original.getProcessedLineage(), updated.getProcessedLineage());
+          });
+      compareAndUpdate(
+          "sourceUrl",
+          () -> {
+            recordChange("sourceUrl", original.getSourceUrl(), updated.getSourceUrl());
+          });
+      compareAndUpdate(
+          "sourceHash",
+          () -> {
+            recordChange(
+                "sourceHash",
+                original.getSourceHash(),
+                updated.getSourceHash(),
+                false,
+                EntityUtil.objectMatch,
+                false);
+          });
     }
 
     private void updateProcessedLineage(StoredProcedure origSP, StoredProcedure updatedSP) {

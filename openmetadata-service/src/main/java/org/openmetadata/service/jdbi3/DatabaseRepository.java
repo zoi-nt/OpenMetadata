@@ -40,6 +40,8 @@ import org.apache.commons.csv.CSVRecord;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.commons.text.StringEscapeUtils;
 import org.jdbi.v3.sqlobject.transaction.Transaction;
+import org.openmetadata.csv.CsvExportProgressCallback;
+import org.openmetadata.csv.CsvImportProgressCallback;
 import org.openmetadata.csv.CsvUtil;
 import org.openmetadata.csv.EntityCsv;
 import org.openmetadata.schema.EntityInterface;
@@ -65,6 +67,7 @@ import org.openmetadata.service.exception.EntityNotFoundException;
 import org.openmetadata.service.resources.databases.DatabaseResource;
 import org.openmetadata.service.util.EntityUtil;
 import org.openmetadata.service.util.EntityUtil.Fields;
+import org.openmetadata.service.util.EntityUtil.RelationIncludes;
 import org.openmetadata.service.util.FullyQualifiedName;
 
 @Slf4j
@@ -93,7 +96,7 @@ public class DatabaseRepository extends EntityRepository<Database> {
   @Override
   public void setFullyQualifiedName(Database database) {
     database.setFullyQualifiedName(
-        FullyQualifiedName.build(database.getService().getName(), database.getName()));
+        FullyQualifiedName.add(database.getService().getFullyQualifiedName(), database.getName()));
   }
 
   @Override
@@ -102,12 +105,25 @@ public class DatabaseRepository extends EntityRepository<Database> {
   }
 
   @Override
+  protected List<String> getFieldsStrippedFromStorageJson() {
+    return List.of("service");
+  }
+
+  @Override
   public void storeEntity(Database database, boolean update) {
-    // Relationships and fields such as service are not stored as part of json
-    EntityReference service = database.getService();
-    database.withService(null);
     store(database, update);
-    database.withService(service);
+  }
+
+  @Override
+  public void storeEntities(List<Database> databases) {
+    storeMany(databases);
+  }
+
+  @Override
+  protected void clearEntitySpecificRelationshipsForMany(List<Database> entities) {
+    if (entities.isEmpty()) return;
+    List<UUID> ids = entities.stream().map(Database::getId).toList();
+    deleteToMany(ids, entityType, Relationship.CONTAINS, null);
   }
 
   @Override
@@ -115,10 +131,34 @@ public class DatabaseRepository extends EntityRepository<Database> {
     addServiceRelationship(database, database.getService());
   }
 
+  @Override
+  protected void storeEntitySpecificRelationshipsForMany(List<Database> entities) {
+    List<CollectionDAO.EntityRelationshipObject> relationships = new ArrayList<>();
+    for (Database database : entities) {
+      EntityReference service = database.getService();
+      if (service == null || service.getId() == null) {
+        continue;
+      }
+      relationships.add(
+          newRelationship(
+              service.getId(),
+              database.getId(),
+              service.getType(),
+              entityType,
+              Relationship.CONTAINS));
+    }
+    bulkInsertRelationships(relationships);
+  }
+
   private List<EntityReference> getSchemas(Database database) {
     return database == null
         ? null
         : findTo(database.getId(), Entity.DATABASE, Relationship.CONTAINS, Entity.DATABASE_SCHEMA);
+  }
+
+  @Override
+  protected EntityReference getParentReference(Database entity) {
+    return entity.getService();
   }
 
   @Override
@@ -143,6 +183,13 @@ public class DatabaseRepository extends EntityRepository<Database> {
 
   @Override
   public String exportToCsv(String name, String user, boolean recursive) throws IOException {
+    return exportToCsv(name, user, recursive, null);
+  }
+
+  @Override
+  public String exportToCsv(
+      String name, String user, boolean recursive, CsvExportProgressCallback callback)
+      throws IOException {
     Database database = getByName(null, name, Fields.EMPTY_FIELDS); // Validate database name
 
     // Get schemas
@@ -155,12 +202,18 @@ public class DatabaseRepository extends EntityRepository<Database> {
     schemas.sort(Comparator.comparing(EntityInterface::getFullyQualifiedName));
 
     // Export schemas and all their child entities
-    return new DatabaseCsv(database, user, recursive).exportAllCsv(schemas, recursive);
+    return new DatabaseCsv(database, user, recursive).exportAllCsv(schemas, recursive, callback);
   }
 
   @Override
   public CsvImportResult importFromCsv(
-      String name, String csv, boolean dryRun, String user, boolean recursive) throws IOException {
+      String name,
+      String csv,
+      boolean dryRun,
+      String user,
+      boolean recursive,
+      CsvImportProgressCallback callback)
+      throws IOException {
     Database database = null;
     try {
       database = getByName(null, name, getFields("service"));
@@ -180,10 +233,11 @@ public class DatabaseRepository extends EntityRepository<Database> {
     } else {
       records = databaseCsv.parse(csv);
     }
-    return databaseCsv.importCsv(records, dryRun);
+    return databaseCsv.importCsv(records, dryRun, callback);
   }
 
-  public void setFields(Database database, Fields fields) {
+  @Override
+  public void setFields(Database database, Fields fields, RelationIncludes relationIncludes) {
     database.setService(getContainer(database.getId()));
     database.setDatabaseSchemas(
         fields.contains("databaseSchemas") ? getSchemas(database) : database.getDatabaseSchemas());
@@ -281,7 +335,8 @@ public class DatabaseRepository extends EntityRepository<Database> {
   }
 
   private void populateService(Database database) {
-    DatabaseService service = Entity.getEntity(database.getService(), "", Include.NON_DELETED);
+    var service =
+        (DatabaseService) getCachedParentOrLoad(database.getService(), "", Include.NON_DELETED);
     database.setService(service.getEntityReference());
     database.setServiceType(service.getServiceType());
   }
@@ -405,11 +460,22 @@ public class DatabaseRepository extends EntityRepository<Database> {
       return;
     }
 
+    List<Database> databasesMissingDefaultService =
+        databases.stream().filter(this::needsDefaultService).toList();
+    if (databasesMissingDefaultService.isEmpty()) {
+      return;
+    }
+
     // Batch fetch service references for all databases
-    var serviceMap = batchFetchServices(databases);
+    var serviceMap = batchFetchServices(databasesMissingDefaultService);
 
     // Set service for all databases
-    databases.forEach(database -> database.setService(serviceMap.get(database.getId())));
+    databasesMissingDefaultService.forEach(
+        database -> database.setService(serviceMap.get(database.getId())));
+  }
+
+  private boolean needsDefaultService(Database database) {
+    return database.getService() == null;
   }
 
   private Map<UUID, EntityReference> batchFetchServices(List<Database> databases) {
@@ -464,9 +530,28 @@ public class DatabaseRepository extends EntityRepository<Database> {
     @Transaction
     @Override
     public void entitySpecificUpdate(boolean consolidatingChanges) {
-      recordChange("retentionPeriod", original.getRetentionPeriod(), updated.getRetentionPeriod());
-      recordChange("sourceUrl", original.getSourceUrl(), updated.getSourceUrl());
-      recordChange("sourceHash", original.getSourceHash(), updated.getSourceHash());
+      compareAndUpdate(
+          "retentionPeriod",
+          () -> {
+            recordChange(
+                "retentionPeriod", original.getRetentionPeriod(), updated.getRetentionPeriod());
+          });
+      compareAndUpdate(
+          "sourceUrl",
+          () -> {
+            recordChange("sourceUrl", original.getSourceUrl(), updated.getSourceUrl());
+          });
+      compareAndUpdate(
+          "sourceHash",
+          () -> {
+            recordChange(
+                "sourceHash",
+                original.getSourceHash(),
+                updated.getSourceHash(),
+                false,
+                EntityUtil.objectMatch,
+                false);
+          });
     }
   }
 
@@ -488,13 +573,27 @@ public class DatabaseRepository extends EntityRepository<Database> {
      * Export database schemas and all their child entities (tables, views, stored procedures)
      */
     public String exportAllCsv(List<DatabaseSchema> schemas, boolean recursive) throws IOException {
+      return exportAllCsv(schemas, recursive, null);
+    }
+
+    public String exportAllCsv(
+        List<DatabaseSchema> schemas, boolean recursive, CsvExportProgressCallback callback)
+        throws IOException {
       // Create CSV file with schemas
       CsvFile csvFile = new CsvFile().withHeaders(HEADERS);
+
+      int total = schemas.size();
+      int exported = 0;
 
       // Add schemas
       for (DatabaseSchema schema : schemas) {
         addEntityToCSV(csvFile, schema, DATABASE_SCHEMA);
         if (!recursive) {
+          exported++;
+          if (callback != null) {
+            String message = String.format("Exported %d of %d schemas", exported, total);
+            callback.onProgress(exported, total, message);
+          }
           continue;
         }
 
@@ -525,6 +624,12 @@ public class DatabaseRepository extends EntityRepository<Database> {
         // Add stored procedures
         for (StoredProcedure sp : storedProcedures) {
           addEntityToCSV(csvFile, sp, STORED_PROCEDURE);
+        }
+
+        exported++;
+        if (callback != null) {
+          String message = String.format("Exported %d of %d schemas", exported, total);
+          callback.onProgress(exported, total, message);
         }
       }
 
@@ -627,14 +732,30 @@ public class DatabaseRepository extends EntityRepository<Database> {
       CSVRecord csvRecord = getNextRecord(printer, csvRecords);
       String schemaFqn = FullyQualifiedName.add(database.getFullyQualifiedName(), csvRecord.get(0));
       DatabaseSchema schema;
-      try {
-        schema = Entity.getEntityByName(DATABASE_SCHEMA, schemaFqn, "*", Include.NON_DELETED);
-      } catch (Exception ex) {
-        LOG.warn("Database Schema not found: {}, it will be created with Import.", schemaFqn);
-        schema =
-            new DatabaseSchema()
-                .withDatabase(database.getEntityReference())
-                .withService(database.getService());
+      if (importResult.getDryRun()) {
+        // Dry run mode - check if exists, create simulation if not
+        try {
+          schema = Entity.getEntityByName(DATABASE_SCHEMA, schemaFqn, "*", Include.NON_DELETED);
+        } catch (EntityNotFoundException ex) {
+          LOG.warn("Dry run: Database Schema not found: {}, simulating creation.", schemaFqn);
+          schema =
+              new DatabaseSchema()
+                  .withDatabase(database.getEntityReference())
+                  .withService(database.getService());
+        }
+      } else {
+        // Dry Run = false, True Run - use dependency resolution (checks flush list)
+        try {
+          schema =
+              getEntityWithDependencyResolution(
+                  DATABASE_SCHEMA, schemaFqn, "*", Include.NON_DELETED);
+        } catch (EntityNotFoundException ex) {
+          LOG.warn("Database Schema not found: {}, it will be created with Import.", schemaFqn);
+          schema =
+              new DatabaseSchema()
+                  .withDatabase(database.getEntityReference())
+                  .withService(database.getService());
+        }
       }
 
       // Headers: name, displayName, description, owner, tags, glossaryTerms, tiers, certification,

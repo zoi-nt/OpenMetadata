@@ -19,8 +19,6 @@ import static org.openmetadata.schema.type.Include.NON_DELETED;
 import static org.openmetadata.service.Entity.METRIC;
 import static org.openmetadata.service.Entity.TEAM;
 import static org.openmetadata.service.exception.CatalogExceptionMessage.notReviewer;
-import static org.openmetadata.service.governance.workflows.Workflow.RESULT_VARIABLE;
-import static org.openmetadata.service.governance.workflows.Workflow.UPDATED_BY_VARIABLE;
 
 import jakarta.json.JsonPatch;
 import java.util.ArrayList;
@@ -31,9 +29,7 @@ import java.util.UUID;
 import lombok.extern.slf4j.Slf4j;
 import org.jdbi.v3.sqlobject.transaction.Transaction;
 import org.openmetadata.common.utils.CommonUtil;
-import org.openmetadata.schema.EntityInterface;
 import org.openmetadata.schema.api.feed.CloseTask;
-import org.openmetadata.schema.api.feed.ResolveTask;
 import org.openmetadata.schema.entity.data.Metric;
 import org.openmetadata.schema.entity.feed.Thread;
 import org.openmetadata.schema.entity.teams.Team;
@@ -48,7 +44,6 @@ import org.openmetadata.schema.type.change.ChangeSource;
 import org.openmetadata.schema.utils.JsonUtils;
 import org.openmetadata.service.Entity;
 import org.openmetadata.service.exception.EntityNotFoundException;
-import org.openmetadata.service.governance.workflows.WorkflowHandler;
 import org.openmetadata.service.jdbi3.FeedRepository.TaskWorkflow;
 import org.openmetadata.service.jdbi3.FeedRepository.ThreadContext;
 import org.openmetadata.service.resources.feeds.MessageParser;
@@ -56,6 +51,7 @@ import org.openmetadata.service.resources.feeds.MessageParser.EntityLink;
 import org.openmetadata.service.resources.metrics.MetricResource;
 import org.openmetadata.service.security.AuthorizationException;
 import org.openmetadata.service.util.EntityUtil;
+import org.openmetadata.service.util.EntityUtil.RelationIncludes;
 import org.openmetadata.service.util.RestUtil;
 import org.openmetadata.service.util.WebsocketNotificationHandler;
 
@@ -108,7 +104,8 @@ public class MetricRepository extends EntityRepository<Metric> {
   }
 
   @Override
-  public void setFields(Metric metric, EntityUtil.Fields fields) {
+  public void setFields(
+      Metric metric, EntityUtil.Fields fields, RelationIncludes relationIncludes) {
     metric.setRelatedMetrics(
         fields.contains("relatedMetrics") ? getRelatedMetrics(metric) : metric.getRelatedMetrics());
   }
@@ -128,11 +125,26 @@ public class MetricRepository extends EntityRepository<Metric> {
   }
 
   @Override
+  protected List<String> getFieldsStrippedFromStorageJson() {
+    return List.of("relatedMetrics");
+  }
+
+  @Override
   public void storeEntity(Metric metric, boolean update) {
-    List<EntityReference> relatedMetrics = metric.getRelatedMetrics();
-    metric.setRelatedMetrics(null);
     store(metric, update);
-    metric.setRelatedMetrics(relatedMetrics);
+  }
+
+  @Override
+  public void storeEntities(List<Metric> entities) {
+    storeMany(entities);
+  }
+
+  @Override
+  protected void clearEntitySpecificRelationshipsForMany(List<Metric> entities) {
+    if (entities.isEmpty()) return;
+    List<UUID> ids = entities.stream().map(Metric::getId).toList();
+    deleteFromMany(ids, Entity.METRIC, Relationship.RELATED_TO, Entity.METRIC);
+    deleteToMany(ids, Entity.METRIC, Relationship.RELATED_TO, Entity.METRIC);
   }
 
   @Override
@@ -176,7 +188,6 @@ public class MetricRepository extends EntityRepository<Metric> {
     @Override
     public void updateReviewers() {
       super.updateReviewers();
-      // adding the reviewer should add the person as assignee to the task
       if (original.getReviewers() != null
           && updated.getReviewers() != null
           && !original.getReviewers().equals(updated.getReviewers())) {
@@ -187,19 +198,47 @@ public class MetricRepository extends EntityRepository<Metric> {
     @Transaction
     @Override
     public void entitySpecificUpdate(boolean consolidatingChanges) {
-      recordChange("granularity", original.getGranularity(), updated.getGranularity());
-      recordChange("metricType", original.getMetricType(), updated.getMetricType());
-      recordChange(
-          "unitOfMeasurement", original.getUnitOfMeasurement(), updated.getUnitOfMeasurement());
-      recordChange(
+      compareAndUpdate(
+          "granularity",
+          () -> {
+            recordChange("granularity", original.getGranularity(), updated.getGranularity());
+          });
+      compareAndUpdate(
+          "metricType",
+          () -> {
+            recordChange("metricType", original.getMetricType(), updated.getMetricType());
+          });
+      compareAndUpdate(
+          "unitOfMeasurement",
+          () -> {
+            recordChange(
+                "unitOfMeasurement",
+                original.getUnitOfMeasurement(),
+                updated.getUnitOfMeasurement());
+          });
+      compareAndUpdate(
           "customUnitOfMeasurement",
-          original.getCustomUnitOfMeasurement(),
-          updated.getCustomUnitOfMeasurement());
-      if (updated.getMetricExpression() != null) {
-        recordChange(
-            "metricExpression", original.getMetricExpression(), updated.getMetricExpression());
-      }
-      updateRelatedMetrics(original, updated);
+          () -> {
+            recordChange(
+                "customUnitOfMeasurement",
+                original.getCustomUnitOfMeasurement(),
+                updated.getCustomUnitOfMeasurement());
+          });
+      compareAndUpdate(
+          "metricExpression",
+          () -> {
+            if (updated.getMetricExpression() != null) {
+              recordChange(
+                  "metricExpression",
+                  original.getMetricExpression(),
+                  updated.getMetricExpression());
+            }
+          });
+      compareAndUpdate(
+          "relatedMetrics",
+          () -> {
+            updateRelatedMetrics(original, updated);
+          });
     }
 
     private void updateRelatedMetrics(Metric original, Metric updated) {
@@ -280,7 +319,8 @@ public class MetricRepository extends EntityRepository<Metric> {
     // Handle case where task goes from DRAFT to IN_REVIEW to DRAFT quickly
     // Due to ChangesConsolidation, the postUpdate will be called as from DRAFT to DRAFT,
     // but there will be a task created. This handles that case scenario.
-    if (updated.getEntityStatus() == EntityStatus.DRAFT) {
+    if (original.getEntityStatus() != EntityStatus.DRAFT
+        && updated.getEntityStatus() == EntityStatus.DRAFT) {
       try {
         closeApprovalTask(updated, "Closed due to metric going back to DRAFT.");
       } catch (EntityNotFoundException ignored) {
@@ -291,7 +331,6 @@ public class MetricRepository extends EntityRepository<Metric> {
 
   @Override
   protected void preDelete(Metric entity, String deletedBy) {
-    // A metric in `IN_REVIEW` state can only be deleted by the reviewers
     if (EntityStatus.IN_REVIEW.equals(entity.getEntityStatus())) {
       checkUpdatedByReviewer(entity, deletedBy);
     }
@@ -300,10 +339,6 @@ public class MetricRepository extends EntityRepository<Metric> {
   @Override
   public TaskWorkflow getTaskWorkflow(ThreadContext threadContext) {
     validateTaskThread(threadContext);
-    TaskType taskType = threadContext.getThread().getTask().getType();
-    if (EntityUtil.isApprovalTask(taskType)) {
-      return new ApprovalTaskWorkflow(threadContext);
-    }
     return super.getTaskWorkflow(threadContext);
   }
 
@@ -377,28 +412,6 @@ public class MetricRepository extends EntityRepository<Metric> {
           "{} Task not found for metric {}",
           TaskType.RequestApproval,
           metric.getFullyQualifiedName());
-    }
-  }
-
-  public static class ApprovalTaskWorkflow extends TaskWorkflow {
-    ApprovalTaskWorkflow(ThreadContext threadContext) {
-      super(threadContext);
-    }
-
-    @Override
-    public EntityInterface performTask(String user, ResolveTask resolveTask) {
-      Metric metric = (Metric) threadContext.getAboutEntity();
-      MetricRepository.checkUpdatedByReviewer(metric, user);
-
-      UUID taskId = threadContext.getThread().getId();
-      Map<String, Object> variables = new HashMap<>();
-      variables.put(RESULT_VARIABLE, resolveTask.getNewValue().equalsIgnoreCase("approved"));
-      variables.put(UPDATED_BY_VARIABLE, user);
-      WorkflowHandler workflowHandler = WorkflowHandler.getInstance();
-      workflowHandler.resolveTask(
-          taskId, workflowHandler.transformToNodeVariables(taskId, variables));
-
-      return metric;
     }
   }
 }

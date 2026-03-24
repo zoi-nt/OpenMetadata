@@ -17,9 +17,11 @@ import traceback
 from metadata.generated.schema.entity.services.connections.dashboard.supersetConnection import (
     SupersetConnection,
 )
+from metadata.ingestion.connections.source_api_client import TrackedREST
 from metadata.ingestion.ometa.auth_provider import AuthenticationProvider
-from metadata.ingestion.ometa.client import REST, ClientConfig
+from metadata.ingestion.ometa.client import ClientConfig
 from metadata.ingestion.source.dashboard.superset.models import (
+    FetchedDashboard,
     ListDatabaseResult,
     SupersetChart,
     SupersetDashboardCount,
@@ -49,7 +51,7 @@ class SupersetAuthenticationProvider(AuthenticationProvider):
             allow_redirects=True,
             verify=get_verify_ssl(config.connection.sslConfig),
         )
-        self.client = REST(client_config)
+        self.client = TrackedREST(client_config, source_name="superset")
         self.generated_auth_token = None
         self.expiry = None
         super().__init__()
@@ -83,7 +85,7 @@ class SupersetAPIClient:
     Superset client wrapper using the REST helper class
     """
 
-    client: REST
+    client: TrackedREST
     _auth_provider: AuthenticationProvider
 
     def __init__(self, config: SupersetConnection):
@@ -98,7 +100,7 @@ class SupersetAPIClient:
             allow_redirects=True,
             verify=get_verify_ssl(config.connection.sslConfig),
         )
-        self.client = REST(client_config)
+        self.client = TrackedREST(client_config, source_name="superset")
 
     def get_dashboard_count(self) -> int:
         resp_dashboards = self.client.get("/dashboard/?q=(page:0,page_size:1)")
@@ -146,6 +148,27 @@ class SupersetAPIClient:
             logger.debug(traceback.format_exc())
             logger.warning("Failed to fetch the dashboard list")
         return SupersetDashboardCount()
+
+    def fetch_dashboard(self, dashboard_id: int) -> FetchedDashboard:
+        """
+        Fetch individual dashboard details including position_json
+        This is needed for Superset 5.0.0+ where position_json was removed from list endpoint
+
+        Args:
+            dashboard_id (int): dashboard ID
+
+        Returns:
+            FetchedDashboard: Dashboard details
+        """
+        try:
+            response = self.client.get(f"/dashboard/{dashboard_id}")
+            if response:
+                dashboard = FetchedDashboard(**response)
+                return dashboard
+        except Exception:
+            logger.debug(traceback.format_exc())
+            logger.warning(f"Failed to fetch dashboard {dashboard_id}")
+        return FetchedDashboard()
 
     def get_chart_count(self) -> int:
         resp_chart = self.client.get("/chart/?q=(page:0,page_size:1)")

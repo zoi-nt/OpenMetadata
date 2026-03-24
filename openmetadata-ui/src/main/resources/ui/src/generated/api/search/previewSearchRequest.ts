@@ -1,5 +1,5 @@
 /*
- *  Copyright 2025 Collate.
+ *  Copyright 2026 Collate.
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
  *  You may obtain a copy of the License at
@@ -346,10 +346,18 @@ export interface GlobalSettings {
     /**
      * Which fields to highlight by default.
      */
-    highlightFields?:   string[];
+    highlightFields?: string[];
+    /**
+     * Weight for BM25 keyword search in hybrid RRF pipeline (0.0-1.0)
+     */
+    keywordWeight?:     number;
     maxAggregateSize?:  number;
     maxAnalyzedOffset?: number;
     maxResultHits?:     number;
+    /**
+     * Weight for semantic vector search in hybrid RRF pipeline (0.0-1.0)
+     */
+    semanticWeight?: number;
     /**
      * List of field=value term-boost rules that apply only to this asset.
      */

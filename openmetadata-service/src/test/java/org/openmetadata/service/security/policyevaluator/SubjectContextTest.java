@@ -39,6 +39,7 @@ import org.openmetadata.schema.entity.teams.Team;
 import org.openmetadata.schema.entity.teams.User;
 import org.openmetadata.schema.type.EntityReference;
 import org.openmetadata.schema.type.Include;
+import org.openmetadata.schema.utils.JsonUtils;
 import org.openmetadata.service.Entity;
 import org.openmetadata.service.jdbi3.EntityRepository;
 import org.openmetadata.service.jdbi3.PolicyRepository;
@@ -79,8 +80,10 @@ public class SubjectContextTest {
                 isNull(), anyString(), isNull(), any(Include.class), anyBoolean()))
         .thenAnswer(
             i ->
-                EntityRepository.CACHE_WITH_NAME.get(
-                    new ImmutablePair<>(Entity.USER, i.getArgument(1))));
+                JsonUtils.readValue(
+                    EntityRepository.CACHE_WITH_NAME.get(
+                        new ImmutablePair<>(Entity.USER, i.getArgument(1))),
+                    User.class));
 
     TeamRepository teamRepository = mock(TeamRepository.class);
     Entity.registerEntity(Team.class, Entity.TEAM, teamRepository);
@@ -89,8 +92,10 @@ public class SubjectContextTest {
                 isNull(), any(UUID.class), isNull(), any(Include.class), anyBoolean()))
         .thenAnswer(
             i ->
-                EntityRepository.CACHE_WITH_ID.get(
-                    new ImmutablePair<>(Entity.TEAM, i.getArgument(1))));
+                JsonUtils.readValue(
+                    EntityRepository.CACHE_WITH_ID.get(
+                        new ImmutablePair<>(Entity.TEAM, i.getArgument(1))),
+                    Team.class));
 
     RoleRepository roleRepository = mock(RoleRepository.class);
     Entity.registerEntity(Role.class, Entity.ROLE, roleRepository);
@@ -99,8 +104,10 @@ public class SubjectContextTest {
                 isNull(), any(UUID.class), isNull(), any(Include.class), anyBoolean()))
         .thenAnswer(
             i ->
-                EntityRepository.CACHE_WITH_ID.get(
-                    new ImmutablePair<>(Entity.ROLE, i.getArgument(1))));
+                JsonUtils.readValue(
+                    EntityRepository.CACHE_WITH_ID.get(
+                        new ImmutablePair<>(Entity.ROLE, i.getArgument(1))),
+                    Role.class));
 
     PolicyRepository policyRepository = mock(PolicyRepository.class);
     Entity.registerEntity(Policy.class, Entity.POLICY, policyRepository);
@@ -109,8 +116,10 @@ public class SubjectContextTest {
                 isNull(), any(UUID.class), isNull(), any(Include.class), anyBoolean()))
         .thenAnswer(
             i ->
-                EntityRepository.CACHE_WITH_ID.get(
-                    new ImmutablePair<>(Entity.POLICY, i.getArgument(1))));
+                JsonUtils.readValue(
+                    EntityRepository.CACHE_WITH_ID.get(
+                        new ImmutablePair<>(Entity.POLICY, i.getArgument(1))),
+                    Policy.class));
 
     // Create team hierarchy:
     //                           team1
@@ -153,7 +162,8 @@ public class SubjectContextTest {
             .withName("user")
             .withRoles(userRolesRef)
             .withTeams(List.of(team111.getEntityReference()));
-    EntityRepository.CACHE_WITH_NAME.put(new ImmutablePair<>(Entity.USER, "user"), user);
+    EntityRepository.CACHE_WITH_NAME.put(
+        new ImmutablePair<>(Entity.USER, "user"), JsonUtils.pojoToJson(user));
   }
 
   @BeforeEach
@@ -244,7 +254,8 @@ public class SubjectContextTest {
       String name = prefix + "_role_" + i;
       List<EntityReference> policies = toEntityReferences(getPolicies(name));
       Role role = new Role().withName(name).withId(UUID.randomUUID()).withPolicies(policies);
-      EntityRepository.CACHE_WITH_ID.put(new ImmutablePair<>(Entity.ROLE, role.getId()), role);
+      EntityRepository.CACHE_WITH_ID.put(
+          new ImmutablePair<>(Entity.ROLE, role.getId()), JsonUtils.pojoToJson(role));
       roles.add(role);
     }
     return roles;
@@ -258,7 +269,7 @@ public class SubjectContextTest {
           new Policy().withName(name).withId(UUID.randomUUID()).withRules(getRules(name));
       policies.add(policy);
       EntityRepository.CACHE_WITH_ID.put(
-          new ImmutablePair<>(Entity.POLICY, policy.getId()), policy);
+          new ImmutablePair<>(Entity.POLICY, policy.getId()), JsonUtils.pojoToJson(policy));
     }
     return policies;
   }
@@ -315,7 +326,8 @@ public class SubjectContextTest {
             .withDefaultRoles(toEntityReferences(roles))
             .withPolicies(toEntityReferences(policies))
             .withParents(parentList);
-    EntityRepository.CACHE_WITH_ID.put(new ImmutablePair<>(Entity.TEAM, team.getId()), team);
+    EntityRepository.CACHE_WITH_ID.put(
+        new ImmutablePair<>(Entity.TEAM, team.getId()), JsonUtils.pojoToJson(team));
     return team;
   }
 
@@ -328,5 +340,131 @@ public class SubjectContextTest {
       count++;
     }
     assertEquals(expectedPolicyOrder.size(), count);
+  }
+
+  @Test
+  void testIsReviewer() {
+    SubjectContext subjectContext = SubjectContext.getSubjectContext(user.getName());
+
+    // Case 1: reviewers list is null or empty
+    assertFalse(subjectContext.isReviewer(null), "Expected false when reviewers is null");
+    assertFalse(
+        subjectContext.isReviewer(new ArrayList<>()), "Expected false when reviewers is empty");
+
+    // Case 2: reviewer is same user
+    List<EntityReference> reviewers =
+        List.of(new EntityReference().withType(Entity.USER).withName("user"));
+    assertTrue(subjectContext.isReviewer(reviewers), "User should be reviewer if listed as USER");
+
+    // Case 3: reviewer is one of the user's teams
+    reviewers = List.of(new EntityReference().withType(Entity.TEAM).withName("team111"));
+    assertTrue(
+        subjectContext.isReviewer(reviewers),
+        "User should be reviewer if their team is in reviewers list");
+
+    // Case 4: reviewer list does not match user or their team
+    reviewers =
+        List.of(
+            new EntityReference().withType(Entity.USER).withName("someone_else"),
+            new EntityReference().withType(Entity.TEAM).withName("team13"));
+    assertFalse(
+        subjectContext.isReviewer(reviewers), "User should not be reviewer if no match found");
+  }
+
+  @Test
+  void testCircularDependencyInTeamHierarchy() {
+    // Test case 1: Direct circular dependency - team pointing to itself
+    List<Role> circularTeamRoles = getRoles("circularTeam");
+    List<Policy> circularTeamPolicies = getPolicies("circularTeam");
+    Team circularTeam =
+        new Team()
+            .withName("circularTeam")
+            .withId(UUID.randomUUID())
+            .withDefaultRoles(toEntityReferences(circularTeamRoles))
+            .withPolicies(toEntityReferences(circularTeamPolicies));
+    EntityRepository.CACHE_WITH_ID.put(
+        new ImmutablePair<>(Entity.TEAM, circularTeam.getId()), JsonUtils.pojoToJson(circularTeam));
+
+    // Create circular reference - team points to itself as parent
+    circularTeam.setParents(List.of(circularTeam.getEntityReference()));
+    EntityRepository.CACHE_WITH_ID.put(
+        new ImmutablePair<>(Entity.TEAM, circularTeam.getId()), JsonUtils.pojoToJson(circularTeam));
+
+    // Test getRolesForTeams - should not cause StackOverflowError
+    List<EntityReference> roles =
+        SubjectContext.getRolesForTeams(List.of(circularTeam.getEntityReference()));
+    assertFalse(roles.isEmpty(), "Should return roles even with circular dependency");
+
+    // Test isInTeam - should not cause infinite loop
+    boolean result = SubjectContext.isInTeam("circularTeam", circularTeam.getEntityReference());
+    assertTrue(result, "Team should be found in its own hierarchy");
+
+    // Test case 2: Indirect circular dependency - teamA -> teamB -> teamA
+    List<Role> teamARoles = getRoles("teamA");
+    List<Policy> teamAPolicies = getPolicies("teamA");
+    Team teamA =
+        new Team()
+            .withName("teamA")
+            .withId(UUID.randomUUID())
+            .withDefaultRoles(toEntityReferences(teamARoles))
+            .withPolicies(toEntityReferences(teamAPolicies));
+    EntityRepository.CACHE_WITH_ID.put(
+        new ImmutablePair<>(Entity.TEAM, teamA.getId()), JsonUtils.pojoToJson(teamA));
+
+    List<Role> teamBRoles = getRoles("teamB");
+    List<Policy> teamBPolicies = getPolicies("teamB");
+    Team teamB =
+        new Team()
+            .withName("teamB")
+            .withId(UUID.randomUUID())
+            .withDefaultRoles(toEntityReferences(teamBRoles))
+            .withPolicies(toEntityReferences(teamBPolicies));
+    EntityRepository.CACHE_WITH_ID.put(
+        new ImmutablePair<>(Entity.TEAM, teamB.getId()), JsonUtils.pojoToJson(teamB));
+
+    // Create circular dependency: teamA -> teamB -> teamA
+    teamA.setParents(List.of(teamB.getEntityReference()));
+    teamB.setParents(List.of(teamA.getEntityReference()));
+    EntityRepository.CACHE_WITH_ID.put(
+        new ImmutablePair<>(Entity.TEAM, teamA.getId()), JsonUtils.pojoToJson(teamA));
+    EntityRepository.CACHE_WITH_ID.put(
+        new ImmutablePair<>(Entity.TEAM, teamB.getId()), JsonUtils.pojoToJson(teamB));
+
+    // Test getRolesForTeams - should not cause StackOverflowError
+    List<EntityReference> rolesA =
+        SubjectContext.getRolesForTeams(List.of(teamA.getEntityReference()));
+    assertFalse(rolesA.isEmpty(), "Should return roles even with circular dependency");
+
+    // Test isInTeam - should not cause infinite loop
+    boolean resultA = SubjectContext.isInTeam("teamA", teamB.getEntityReference());
+    assertTrue(resultA, "Team B should be found in team A hierarchy due to circular dependency");
+
+    // Test hasRole with circular dependency
+    User userWithCircularTeam =
+        new User()
+            .withName("circularUser")
+            .withRoles(new ArrayList<>())
+            .withTeams(List.of(teamA.getEntityReference()));
+    EntityRepository.CACHE_WITH_NAME.put(
+        new ImmutablePair<>(Entity.USER, "circularUser"),
+        JsonUtils.pojoToJson(userWithCircularTeam));
+
+    // Should not throw StackOverflowError
+    boolean hasRoleResult = SubjectContext.hasRole(userWithCircularTeam, "teamA_role_1");
+    assertTrue(
+        hasRoleResult, "User should have role from team hierarchy even with circular dependency");
+
+    // Test policy iteration with circular dependency - should not cause infinite loop
+    SubjectContext subjectContext = SubjectContext.getSubjectContext("circularUser");
+    Iterator<PolicyContext> policyIterator = subjectContext.getPolicies(null);
+    int policyCount = 0;
+    int maxPolicies = 1000; // Safety limit to prevent infinite loop in test
+    while (policyIterator.hasNext() && policyCount < maxPolicies) {
+      policyIterator.next();
+      policyCount++;
+    }
+    assertTrue(
+        policyCount < maxPolicies,
+        "Policy iteration should terminate without infinite loop with circular dependency");
   }
 }

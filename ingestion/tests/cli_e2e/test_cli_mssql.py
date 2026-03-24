@@ -126,7 +126,7 @@ class MSSQLCliTest(CliCommonDB.TestSuite, SQACommonMethods):
 
     @staticmethod
     def expected_filtered_table_includes() -> int:
-        return 2
+        return 1
 
     @staticmethod
     def expected_filtered_table_excludes() -> int:
@@ -134,7 +134,7 @@ class MSSQLCliTest(CliCommonDB.TestSuite, SQACommonMethods):
 
     @staticmethod
     def expected_filtered_mix() -> int:
-        return 14
+        return 13
 
     @staticmethod
     def get_profiler_time_partition_results() -> dict:
@@ -150,10 +150,6 @@ class MSSQLCliTest(CliCommonDB.TestSuite, SQACommonMethods):
                         "distinctProportion": 1.0,
                         "duplicateCount": None,
                         "firstQuartile": 2.5,
-                        "histogram": {
-                            "boundaries": ["1.000 to 3.773", "3.773 and up"],
-                            "frequencies": [1, 2],
-                        },
                         "interQuartileRange": 2.0,
                         "max": 5.0,
                         "maxLength": None,

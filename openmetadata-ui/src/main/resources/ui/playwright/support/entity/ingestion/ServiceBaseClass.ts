@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
 /*
  *  Copyright 2024 Collate.
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,6 +18,7 @@ import {
   PlaywrightWorkerArgs,
   TestType,
 } from '@playwright/test';
+import { startCase } from 'lodash';
 import { MAX_CONSECUTIVE_ERRORS } from '../../../constant/service';
 import {
   descriptionBox,
@@ -26,7 +26,6 @@ import {
   getApiContext,
   INVALID_NAMES,
   NAME_VALIDATION_ERROR,
-  toastNotification,
 } from '../../../utils/common';
 import { visitEntityPage } from '../../../utils/entity';
 import { visitServiceDetailsPage } from '../../../utils/service';
@@ -39,6 +38,10 @@ import {
 } from '../../../utils/serviceIngestion';
 import { ResponseDataType } from '../Entity.interface';
 
+interface RunnerDetails {
+  name: string;
+  displayName?: string;
+}
 class ServiceBaseClass {
   public category: Services;
   protected serviceName: string;
@@ -49,6 +52,10 @@ class ServiceBaseClass {
   public shouldAddDefaultFilters: boolean;
   protected entityFQN: string | null;
   public serviceResponseData: ResponseDataType = {} as ResponseDataType;
+  public ingestionRunner: RunnerDetails = {
+    name: 'CollateSaaS',
+    displayName: 'Collate SaaS',
+  };
 
   constructor(
     category: Services,
@@ -57,7 +64,8 @@ class ServiceBaseClass {
     entity: string,
     shouldTestConnection = true,
     shouldAddIngestion = true,
-    shouldAddDefaultFilters = false
+    shouldAddDefaultFilters = false,
+    ingestionRunner?: RunnerDetails
   ) {
     this.category = category;
     this.serviceName = name;
@@ -67,6 +75,7 @@ class ServiceBaseClass {
     this.shouldAddIngestion = shouldAddIngestion;
     this.shouldAddDefaultFilters = shouldAddDefaultFilters;
     this.entityFQN = null;
+    this.ingestionRunner = ingestionRunner ?? this.ingestionRunner;
   }
 
   getServiceName() {
@@ -103,6 +112,39 @@ class ServiceBaseClass {
     // await airflowStatus;
     await this.fillConnectionDetails(page);
 
+    const runnerSelector = page.getByTestId(
+      'select-widget-root/ingestionRunner'
+    );
+
+    if (await runnerSelector.isVisible()) {
+      await runnerSelector.click();
+      await page.locator('.ant-select-dropdown:visible').first().waitFor({
+        state: 'visible',
+      });
+
+      // Search for the runner using the search input
+      await runnerSelector.locator('input').fill(this.ingestionRunner.name);
+
+      // Using data-key which relies on `name` which is more reliable data in AUTs
+      // instead of data-testid which depends on the `displayName` which can change
+      await page
+        .locator(
+          `.ant-select-dropdown:visible [data-key="${this.ingestionRunner.name}"]`
+        )
+        .waitFor({ state: 'visible' });
+      await page
+        .locator(
+          `.ant-select-dropdown:visible [data-key="${this.ingestionRunner.name}"]`
+        )
+        .click();
+
+      await expect(
+        page.getByTestId('select-widget-root/ingestionRunner')
+      ).toContainText(
+        this.ingestionRunner.displayName ?? this.ingestionRunner.name
+      );
+    }
+
     if (this.shouldTestConnection) {
       await testConnection(page);
     }
@@ -125,7 +167,7 @@ class ServiceBaseClass {
     // validation should work
     await page.click('[data-testid="next-button"]');
 
-    await page.waitForSelector('#name_help');
+    await page.locator('#name_help').waitFor();
 
     await expect(page.locator('#name_help')).toHaveText('Name is required');
 
@@ -160,20 +202,19 @@ class ServiceBaseClass {
     if (await metadataTab.isVisible()) {
       await metadataTab.click();
     }
-    await page.waitForLoadState('networkidle');
 
-    await page.waitForSelector('[data-testid="add-new-ingestion-button"]');
+    await page.getByTestId('add-new-ingestion-button').waitFor();
 
     await page.click('[data-testid="add-new-ingestion-button"]');
 
-    await page.waitForSelector(
-      '.ant-dropdown:visible [data-menu-id*="metadata"]'
-    );
+    await page
+      .locator('.ant-dropdown:visible [data-menu-id*="metadata"]')
+      .waitFor();
 
     await page.click('.ant-dropdown:visible [data-menu-id*="metadata"]');
 
     // Add ingestion page
-    await page.waitForSelector('[data-testid="add-ingestion-container"]');
+    await page.getByTestId('add-ingestion-container').waitFor();
     await this.fillIngestionDetails(page);
 
     await page.click('[data-testid="submit-btn"]');
@@ -189,7 +230,7 @@ class ServiceBaseClass {
     await page.click('[data-testid="view-service-button"]');
 
     // Header available once page loads
-    await page.waitForSelector('[data-testid="data-assets-header"]');
+    await page.getByTestId('data-assets-header').waitFor();
     await page
       .getByTestId('table-container')
       .getByTestId('loader')
@@ -199,23 +240,28 @@ class ServiceBaseClass {
     if (await metadataTab2.isVisible()) {
       await metadataTab2.click();
     }
-    await page.waitForLoadState('networkidle');
     await page
       .getByLabel('agents')
       .getByTestId('loader')
       .waitFor({ state: 'detached' });
 
-    // need manual wait to settle down the deployed pipeline, before triggering the pipeline
+    // eslint-disable-next-line playwright/no-wait-for-timeout -- pipeline deployment settling time
     await page.waitForTimeout(3000);
 
     await page.getByTestId('more-actions').first().click();
+
+    const triggerPipeline = page.waitForResponse(
+      (response) =>
+        response
+          .url()
+          .includes('/api/v1/services/ingestionPipelines/trigger/') &&
+        response.status() === 200
+    );
     await page.getByTestId('run-button').click();
 
-    await page.waitForLoadState('networkidle');
+    await triggerPipeline;
 
-    await toastNotification(page, `Pipeline triggered successfully!`);
-
-    // need manual wait to make sure we are awaiting on latest run results
+    // eslint-disable-next-line playwright/no-wait-for-timeout -- wait for latest pipeline run results
     await page.waitForTimeout(2000);
 
     await this.handleIngestionRetry('metadata', page);
@@ -278,7 +324,7 @@ class ServiceBaseClass {
 
     await page.locator('#schedular-form_cron').clear();
 
-    await page.waitForSelector('[data-testid="schedular-card-container"]');
+    await page.getByTestId('schedular-card-container').waitFor();
     await page
       .getByTestId('schedular-card-container')
       .getByText('On Demand')
@@ -311,28 +357,11 @@ class ServiceBaseClass {
     );
   }
 
-  handleIngestionRetry = async (ingestionType = 'metadata', page: Page) => {
-    const { apiContext } = await getApiContext(page);
-
-    // Need to wait before start polling as Ingestion is taking time to reflect state on their db
-    // Queued status are not stored in DB. cc: @ulixius9
-    await page.waitForTimeout(2000);
-
-    const response = await apiContext
-      .get(
-        `/api/v1/services/ingestionPipelines?fields=pipelineStatuses&service=${
-          this.serviceName
-        }&pipelineType=${ingestionType}&serviceType=${getServiceCategoryFromService(
-          this.category
-        )}`
-      )
-      .then((res) => res.json());
-
-    const workflowData = response.data.filter(
-      (d: { pipelineType: string }) => d.pipelineType === ingestionType
-    )[0];
-
-    const oneHourBefore = Date.now() - 86400000;
+  executeIngestionRetrySteps = async (
+    page: Page,
+    workflowData: { fullyQualifiedName: string; name: string },
+    ingestionType: string
+  ) => {
     let consecutiveErrors = 0;
 
     await expect
@@ -342,7 +371,7 @@ class ServiceBaseClass {
             const response = await makeRetryRequest({
               url: `/api/v1/services/ingestionPipelines/${encodeURIComponent(
                 workflowData.fullyQualifiedName
-              )}/pipelineStatus?startTs=${oneHourBefore}&endTs=${Date.now()}`,
+              )}/pipelineStatus?limit=1`,
               page,
             });
             consecutiveErrors = 0; // Reset error counter on success
@@ -378,19 +407,22 @@ class ServiceBaseClass {
 
     await page.reload();
 
-    await page.waitForSelector('[data-testid="data-assets-header"]');
+    await page.getByTestId('data-assets-header').waitFor();
 
     await pipelinePromise;
     await statusPromise;
 
-    await page.waitForSelector('[data-testid="agents"]');
+    await page.getByTestId('agents').waitFor();
     await page.click('[data-testid="agents"]');
     const metadataTab2 = page.locator('[data-testid="metadata-sub-tab"]');
     if (await metadataTab2.isVisible()) {
       await metadataTab2.click();
     }
-    await page.waitForLoadState('networkidle');
-    await page.waitForSelector(`td:has-text("${ingestionType}")`);
+    await expect(
+      page
+        .locator(`[data-row-key*="${workflowData.name}"]`)
+        .getByTestId('pipeline-type')
+    ).toContainText(startCase(ingestionType), { ignoreCase: true });
 
     await expect(
       page
@@ -398,6 +430,41 @@ class ServiceBaseClass {
         .getByTestId('pipeline-status')
         .last()
     ).toContainText('Success');
+  };
+
+  handleIngestionRetryWithWorkflow = async (
+    page: Page,
+    workflowDetails: { fullyQualifiedName: string; name: string },
+    ingestionType = 'metadata'
+  ) => {
+    // eslint-disable-next-line playwright/no-wait-for-timeout -- pipeline deployment settling time
+    await page.waitForTimeout(2000);
+    await this.executeIngestionRetrySteps(page, workflowDetails, ingestionType);
+  };
+
+  handleIngestionRetry = async (ingestionType = 'metadata', page: Page) => {
+    const { apiContext } = await getApiContext(page);
+
+    // Need to wait before start polling as Ingestion is taking time to reflect state on their db
+    // Queued status are not stored in DB. cc: @ulixius9
+    // eslint-disable-next-line playwright/no-wait-for-timeout -- ingestion state propagation delay
+    await page.waitForTimeout(2000);
+
+    const response = await apiContext
+      .get(
+        `/api/v1/services/ingestionPipelines?fields=pipelineStatuses&service=${
+          this.serviceName
+        }&pipelineType=${ingestionType}&serviceType=${getServiceCategoryFromService(
+          this.category
+        )}`
+      )
+      .then((res) => res.json());
+
+    const workflowData = response.data.find(
+      (d: { pipelineType: string }) => d.pipelineType === ingestionType
+    );
+
+    await this.executeIngestionRetrySteps(page, workflowData, ingestionType);
   };
 
   async updateService(page: Page) {
@@ -416,7 +483,6 @@ class ServiceBaseClass {
     if (await metadataTab2.isVisible()) {
       await metadataTab2.click();
     }
-    await page.waitForLoadState('networkidle');
 
     // click and edit pipeline schedule for Hours
 
@@ -425,7 +491,7 @@ class ServiceBaseClass {
     await page.click('[data-testid="submit-btn"]');
 
     // select schedule
-    await page.waitForSelector('[data-testid="schedular-card-container"]');
+    await page.getByTestId('schedular-card-container').waitFor();
     await page
       .getByTestId('schedular-card-container')
       .getByText('Schedule', { exact: true })
@@ -543,12 +609,11 @@ class ServiceBaseClass {
 
     // update description
     await page.click('[data-testid="edit-description"]');
-    await page.waitForSelector(
-      `.description-markdown-editor:visible ${descriptionBox}`,
-      {
+    await page
+      .locator(`.description-markdown-editor:visible ${descriptionBox}`)
+      .waitFor({
         state: 'visible',
-      }
-    );
+      });
     await page.click(`.description-markdown-editor:visible ${descriptionBox}`);
     await page.fill(
       `.description-markdown-editor:visible ${descriptionBox}`,
@@ -580,22 +645,29 @@ class ServiceBaseClass {
     if (await metadataTab2.isVisible()) {
       await metadataTab2.click();
     }
-    await page.waitForLoadState('networkidle');
 
     await ingestionResponse;
     await page
       .getByRole('cell', { name: 'Pause Logs' })
       .waitFor({ state: 'visible' });
 
-    // need manual wait to settle down the deployed pipeline, before triggering the pipeline
+    // eslint-disable-next-line playwright/no-wait-for-timeout -- pipeline deployment settling time
     await page.waitForTimeout(3000);
 
     await page.getByTestId('more-actions').first().click();
+
+    const triggerPipeline = page.waitForResponse(
+      (response) =>
+        response
+          .url()
+          .includes('/api/v1/services/ingestionPipelines/trigger/') &&
+        response.status() === 200
+    );
+
     await page.getByTestId('run-button').click();
+    await triggerPipeline;
 
-    await toastNotification(page, `Pipeline triggered successfully!`);
-
-    // need manual wait to make sure we are awaiting on latest run results
+    // eslint-disable-next-line playwright/no-wait-for-timeout -- wait for latest pipeline run results
     await page.waitForTimeout(2000);
 
     // Wait for success

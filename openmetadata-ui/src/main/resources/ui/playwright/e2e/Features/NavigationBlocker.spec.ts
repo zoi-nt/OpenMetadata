@@ -10,7 +10,8 @@
  *  See the License for the specific language governing permissions and
  *  limitations under the License.
  */
-import { expect, Page, test as base } from '@playwright/test';
+import { test as base, expect, Page } from '@playwright/test';
+import { PLAYWRIGHT_BASIC_TEST_TAG_OBJ } from '../../constant/config';
 import { PersonaClass } from '../../support/persona/PersonaClass';
 import { UserClass } from '../../support/user/UserClass';
 import { performAdminLogin } from '../../utils/admin';
@@ -48,7 +49,7 @@ base.afterAll('Cleanup', async ({ browser }) => {
   await afterAction();
 });
 
-test.describe('Navigation Blocker Tests', () => {
+test.describe('Navigation Blocker Tests', PLAYWRIGHT_BASIC_TEST_TAG_OBJ, () => {
   test.beforeEach(async ({ adminPage }) => {
     await redirectToHomePage(adminPage);
     await setUserDefaultPersona(adminPage, persona.responseData.displayName);
@@ -135,8 +136,6 @@ test.describe('Navigation Blocker Tests', () => {
     // Modal should disappear and navigate to settings
     await expect(adminPage.locator('.ant-modal')).not.toBeVisible();
 
-    await adminPage.waitForLoadState('networkidle');
-
     // Should navigate to the settings page
     expect(adminPage.url()).toContain('settings');
 
@@ -188,7 +187,6 @@ test.describe('Navigation Blocker Tests', () => {
     await expect(adminPage.locator('.ant-modal')).not.toBeVisible();
 
     // Should navigate to the settings page
-    await adminPage.waitForLoadState('networkidle');
 
     // Verify URL changed from customize page
     expect(adminPage.url()).not.toBe(originalUrl);
@@ -234,7 +232,6 @@ test.describe('Navigation Blocker Tests', () => {
       .click();
 
     // Navigation should happen immediately without modal
-    await adminPage.waitForLoadState('networkidle');
 
     expect(adminPage.url()).toContain('settings');
 

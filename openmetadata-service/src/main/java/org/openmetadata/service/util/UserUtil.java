@@ -35,12 +35,14 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
+import org.openmetadata.schema.api.teams.CreateTeam;
 import org.openmetadata.schema.api.teams.CreateUser;
 import org.openmetadata.schema.auth.BasicAuthMechanism;
 import org.openmetadata.schema.auth.JWTAuthMechanism;
 import org.openmetadata.schema.auth.JWTTokenExpiry;
 import org.openmetadata.schema.entity.teams.AuthenticationMechanism;
 import org.openmetadata.schema.entity.teams.Role;
+import org.openmetadata.schema.entity.teams.Team;
 import org.openmetadata.schema.entity.teams.User;
 import org.openmetadata.schema.security.client.OpenMetadataJWTClientConfig;
 import org.openmetadata.schema.services.connections.metadata.AuthProvider;
@@ -70,8 +72,8 @@ public final class UserUtil {
 
   public static void addUsers(
       AuthProvider authProvider, Set<String> adminUsers, String domain, Boolean isAdmin) {
-    try {
-      for (String keyValue : adminUsers) {
+    for (String keyValue : adminUsers) {
+      try {
         String userName = "";
         String password = "";
         if (keyValue.contains(":")) {
@@ -83,9 +85,9 @@ public final class UserUtil {
           password = getPassword(userName);
         }
         createOrUpdateUser(authProvider, userName, password, domain, isAdmin);
+      } catch (Exception ex) {
+        LOG.error("[BootstrapUser] Encountered Exception while bootstrapping admin user", ex);
       }
-    } catch (Exception ex) {
-      LOG.error("[BootstrapUser] Encountered Exception while bootstrapping admin user", ex);
     }
   }
 
@@ -100,8 +102,7 @@ public final class UserUtil {
 
       // Fetch Original User, is available
       User originalUser = userRepository.getByName(null, username, new Fields(fieldList));
-      if (Boolean.FALSE.equals(originalUser.getIsBot())
-          && Boolean.TRUE.equals(originalUser.getIsAdmin())) {
+      if (Boolean.FALSE.equals(originalUser.getIsBot())) {
         updatedUser = originalUser;
 
         // Update Auth Mechanism if not present, and send mail to the user
@@ -177,7 +178,7 @@ public final class UserUtil {
               .withEntityId(user.getId())
               .withEntityType(Entity.USER)
               .withEntityFullyQualifiedName(user.getFullyQualifiedName())
-              .withUserName("External Authentication Flow")
+              .withUserName(user.getName())
               .withTimestamp(user.getUpdatedAt())
               .withCurrentVersion(user.getVersion())
               .withPreviousVersion(
@@ -238,6 +239,82 @@ public final class UserUtil {
   public static User user(String name, String domain, String updatedBy) {
     return getUser(
         updatedBy, new CreateUser().withName(name).withEmail(name + "@" + domain).withIsBot(false));
+  }
+
+  /**
+   * Assigns a user to teams based on the team names from SAML/JWT claims.
+   * Only teams of type "Group" can have users directly assigned via claims.
+   * If a team exists and is of type Group, it will be assigned to the user.
+   * If a team doesn't exist or is not of type Group, it will be logged and ignored.
+   * This method only ADDS teams - it does not remove users from existing teams.
+   *
+   * @param user User to assign teams to
+   * @param teamNames List of team names from the claim (e.g., groups or department values)
+   * @return true if any team was assigned, false otherwise
+   */
+  public static boolean assignTeamsFromClaim(User user, List<String> teamNames) {
+    if (nullOrEmpty(teamNames)) {
+      return false;
+    }
+
+    List<EntityReference> currentTeams = user.getTeams();
+    if (currentTeams == null) {
+      currentTeams = new ArrayList<>();
+    } else {
+      currentTeams = new ArrayList<>(currentTeams);
+    }
+
+    boolean anyTeamAssigned = false;
+
+    for (String teamName : teamNames) {
+      if (nullOrEmpty(teamName)) {
+        continue;
+      }
+
+      try {
+        Team team = Entity.getEntityByName(Entity.TEAM, teamName, "id,teamType", NON_DELETED);
+
+        if (team.getTeamType() != CreateTeam.TeamType.GROUP) {
+          LOG.warn(
+              "Team '{}' is of type '{}', not 'Group'. "
+                  + "Users can only be auto-assigned to teams of type 'Group' via claims. "
+                  + "User '{}' will not be assigned to this team.",
+              teamName,
+              team.getTeamType(),
+              user.getName());
+          continue;
+        }
+
+        EntityReference teamRef = team.getEntityReference();
+        boolean teamAlreadyAssigned =
+            currentTeams.stream().anyMatch(t -> t.getId().equals(teamRef.getId()));
+
+        if (!teamAlreadyAssigned) {
+          currentTeams.add(teamRef);
+          anyTeamAssigned = true;
+          LOG.info("Assigned team '{}' to user '{}' from claim", teamName, user.getName());
+        }
+      } catch (EntityNotFoundException e) {
+        LOG.warn(
+            "Team '{}' from claim mapping not found in OpenMetadata. "
+                + "User '{}' will not be assigned to this team.",
+            teamName,
+            user.getName());
+      } catch (Exception e) {
+        LOG.error(
+            "Error assigning team '{}' to user '{}': {}",
+            teamName,
+            user.getName(),
+            e.getMessage(),
+            e);
+      }
+    }
+
+    if (anyTeamAssigned) {
+      user.setTeams(currentTeams);
+    }
+
+    return anyTeamAssigned;
   }
 
   /**
@@ -364,25 +441,28 @@ public final class UserUtil {
   public static boolean reSyncUserRolesFromToken(
       UriInfo uriInfo, User user, Set<String> rolesFromToken) {
     boolean syncUser = false;
+    Set<String> mutableRolesFromToken =
+        rolesFromToken == null ? new HashSet<>() : new HashSet<>(rolesFromToken);
 
     User updatedUser = JsonUtils.deepCopy(user, User.class);
     // Check if Admin User
-    if (rolesFromToken.contains(ADMIN_ROLE)) {
+    if (mutableRolesFromToken.contains(ADMIN_ROLE)) {
       if (Boolean.FALSE.equals(user.getIsAdmin())) {
         syncUser = true;
         updatedUser.setIsAdmin(true);
       }
 
       // Remove the Admin Role from the list
-      rolesFromToken.remove(ADMIN_ROLE);
+      mutableRolesFromToken.remove(ADMIN_ROLE);
     }
 
     Set<String> rolesFromUser = getRoleListFromUser(user);
 
     // Check if roles are different
-    if (!nullOrEmpty(rolesFromToken) && isRolesSyncNeeded(rolesFromToken, rolesFromUser)) {
+    if (!nullOrEmpty(mutableRolesFromToken)
+        && isRolesSyncNeeded(mutableRolesFromToken, rolesFromUser)) {
       syncUser = true;
-      List<EntityReference> rolesReferenceFromToken = validateAndGetRolesRef(rolesFromToken);
+      List<EntityReference> rolesReferenceFromToken = validateAndGetRolesRef(mutableRolesFromToken);
       updatedUser.setRoles(rolesReferenceFromToken);
     }
 
@@ -395,6 +475,7 @@ public final class UserUtil {
 
       // Set the updated roles to the original user
       user.setRoles(updatedUser.getRoles());
+      user.setIsAdmin(updatedUser.getIsAdmin());
     }
 
     return syncUser;

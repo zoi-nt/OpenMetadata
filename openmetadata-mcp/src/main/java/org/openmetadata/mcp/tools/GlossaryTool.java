@@ -13,6 +13,7 @@ import org.openmetadata.service.jdbi3.GlossaryRepository;
 import org.openmetadata.service.limits.Limits;
 import org.openmetadata.service.resources.glossary.GlossaryMapper;
 import org.openmetadata.service.security.Authorizer;
+import org.openmetadata.service.security.ImpersonationContext;
 import org.openmetadata.service.security.auth.CatalogSecurityContext;
 import org.openmetadata.service.security.policyevaluator.CreateResourceContext;
 import org.openmetadata.service.security.policyevaluator.OperationContext;
@@ -43,6 +44,14 @@ public class GlossaryTool implements McpTool {
     if (params.containsKey("reviewers")) {
       setReviewers(createGlossary, params);
     }
+    if (params.containsKey("mutuallyExclusive")) {
+      Object meObj = params.get("mutuallyExclusive");
+      if (meObj instanceof Boolean b) {
+        createGlossary.setMutuallyExclusive(b);
+      } else if (meObj instanceof String s) {
+        createGlossary.setMutuallyExclusive("true".equalsIgnoreCase(s));
+      }
+    }
 
     Glossary glossary =
         glossaryMapper.createToEntity(createGlossary, securityContext.getUserPrincipal().getName());
@@ -58,11 +67,14 @@ public class GlossaryTool implements McpTool {
     GlossaryRepository glossaryRepository =
         (GlossaryRepository) Entity.getEntityRepository(Entity.GLOSSARY);
 
-    glossaryRepository.prepare(glossary, true);
-    glossaryRepository.setFullyQualifiedName(glossary);
+    glossaryRepository.prepareInternal(glossary, false);
+
+    String impersonatedBy = ImpersonationContext.getImpersonatedBy();
+
+    String userName = securityContext.getUserPrincipal().getName();
     RestUtil.PutResponse<Glossary> response =
-        glossaryRepository.createOrUpdate(
-            null, glossary, securityContext.getUserPrincipal().getName());
+        glossaryRepository.createOrUpdate(null, glossary, userName, impersonatedBy);
+    McpChangeEventUtil.publishChangeEvent(response.getEntity(), response.getChangeType(), userName);
     return JsonUtils.convertValue(response.getEntity(), Map.class);
   }
 

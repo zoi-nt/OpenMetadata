@@ -20,14 +20,14 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import TitleBreadcrumb from '../../components/common/TitleBreadcrumb/TitleBreadcrumb.component';
 import PageLayoutV1 from '../../components/PageLayoutV1/PageLayoutV1';
 import CreateUserComponent from '../../components/Settings/Users/CreateUser/CreateUser.component';
-import { PAGE_SIZE_LARGE } from '../../constants/constants';
+import { PAGE_SIZE_EXTRA_LARGE } from '../../constants/constants';
 import { GlobalSettingOptions } from '../../constants/GlobalSettings.constants';
 import { useLimitStore } from '../../context/LimitsProvider/useLimitsStore';
 import { CreateUser } from '../../generated/api/teams/createUser';
 import { Role } from '../../generated/entity/teams/role';
 import { useApplicationStore } from '../../hooks/useApplicationStore';
 import { createBot } from '../../rest/botsAPI';
-import { getRoles } from '../../rest/rolesAPIV1';
+import { getAllRoles } from '../../rest/rolesAPIV1';
 import {
   createUser,
   createUserWithPut,
@@ -156,14 +156,12 @@ const CreateUserPage = () => {
 
   const fetchRoles = async () => {
     try {
-      const response = await getRoles(
+      const roles = await getAllRoles(
         '',
-        undefined,
-        undefined,
         false,
-        PAGE_SIZE_LARGE
+        PAGE_SIZE_EXTRA_LARGE // until we implement server-side search, fetch all pages
       );
-      setRoles(response.data);
+      setRoles(roles);
     } catch (err) {
       setRoles([]);
       showErrorToast(

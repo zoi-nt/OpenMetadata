@@ -13,10 +13,12 @@
 
 package org.openmetadata.service.jdbi3;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
 import org.jdbi.v3.sqlobject.transaction.Transaction;
 import org.openmetadata.schema.EntityInterface;
@@ -28,7 +30,9 @@ import org.openmetadata.schema.type.Relationship;
 import org.openmetadata.schema.type.change.ChangeSource;
 import org.openmetadata.service.Entity;
 import org.openmetadata.service.resources.apis.APICollectionResource;
+import org.openmetadata.service.util.EntityUtil;
 import org.openmetadata.service.util.EntityUtil.Fields;
+import org.openmetadata.service.util.EntityUtil.RelationIncludes;
 import org.openmetadata.service.util.FullyQualifiedName;
 
 @Slf4j
@@ -48,7 +52,8 @@ public class APICollectionRepository extends EntityRepository<APICollection> {
   @Override
   public void setFullyQualifiedName(APICollection apiCollection) {
     apiCollection.setFullyQualifiedName(
-        FullyQualifiedName.build(apiCollection.getService().getName(), apiCollection.getName()));
+        FullyQualifiedName.add(
+            apiCollection.getService().getFullyQualifiedName(), apiCollection.getName()));
   }
 
   @Override
@@ -57,17 +62,49 @@ public class APICollectionRepository extends EntityRepository<APICollection> {
   }
 
   @Override
+  protected List<String> getFieldsStrippedFromStorageJson() {
+    return List.of("service");
+  }
+
+  @Override
   public void storeEntity(APICollection apiCollection, boolean update) {
-    // Relationships and fields such as service are not stored as part of json
-    EntityReference service = apiCollection.getService();
-    apiCollection.withService(null);
     store(apiCollection, update);
-    apiCollection.withService(service);
+  }
+
+  @Override
+  public void storeEntities(List<APICollection> entities) {
+    storeMany(entities);
+  }
+
+  @Override
+  protected void clearEntitySpecificRelationshipsForMany(List<APICollection> entities) {
+    if (entities.isEmpty()) return;
+    List<UUID> ids = entities.stream().map(APICollection::getId).toList();
+    deleteToMany(ids, entityType, Relationship.CONTAINS, null);
   }
 
   @Override
   public void storeRelationships(APICollection apiCollection) {
     addServiceRelationship(apiCollection, apiCollection.getService());
+  }
+
+  @Override
+  protected void storeEntitySpecificRelationshipsForMany(List<APICollection> entities) {
+    List<CollectionDAO.EntityRelationshipObject> relationships = new ArrayList<>();
+    for (APICollection apiCollection : entities) {
+      EntityReference service = apiCollection.getService();
+      if (service == null || service.getId() == null) {
+        continue;
+      }
+      relationships.add(
+          newRelationship(
+              service.getId(),
+              apiCollection.getId(),
+              service.getType(),
+              entityType,
+              Relationship.CONTAINS));
+    }
+    bulkInsertRelationships(relationships);
   }
 
   private List<EntityReference> getAPIEndpoints(APICollection apiCollection) {
@@ -81,6 +118,11 @@ public class APICollectionRepository extends EntityRepository<APICollection> {
   }
 
   @Override
+  protected EntityReference getParentReference(APICollection entity) {
+    return entity.getService();
+  }
+
+  @Override
   public EntityInterface getParentEntity(APICollection entity, String fields) {
     if (entity.getService() == null) {
       return null;
@@ -88,8 +130,12 @@ public class APICollectionRepository extends EntityRepository<APICollection> {
     return Entity.getEntity(entity.getService(), fields, Include.ALL);
   }
 
-  public void setFields(APICollection apiCollection, Fields fields) {
-    apiCollection.setService(getContainer(apiCollection.getId()));
+  @Override
+  public void setFields(
+      APICollection apiCollection, Fields fields, RelationIncludes relationIncludes) {
+    if (apiCollection.getService() == null) {
+      apiCollection.setService(getContainer(apiCollection.getId()));
+    }
     apiCollection.setApiEndpoints(
         fields.contains("apiEndpoints")
             ? getAPIEndpoints(apiCollection)
@@ -113,11 +159,17 @@ public class APICollectionRepository extends EntityRepository<APICollection> {
       return;
     }
 
+    List<APICollection> collectionsMissingService =
+        apiCollections.stream().filter(collection -> collection.getService() == null).toList();
+    if (collectionsMissingService.isEmpty()) {
+      return;
+    }
+
     // Batch fetch service references for all API collections
-    Map<UUID, EntityReference> serviceRefs = batchFetchServices(apiCollections);
+    Map<UUID, EntityReference> serviceRefs = batchFetchServices(collectionsMissingService);
 
     // Set service field for all API collections
-    for (APICollection apiCollection : apiCollections) {
+    for (APICollection apiCollection : collectionsMissingService) {
       EntityReference serviceRef = serviceRefs.get(apiCollection.getId());
       if (serviceRef != null) {
         apiCollection.withService(serviceRef);
@@ -137,15 +189,29 @@ public class APICollectionRepository extends EntityRepository<APICollection> {
     List<CollectionDAO.EntityRelationshipObject> records =
         daoCollection
             .relationshipDAO()
-            .findFromBatch(entityListToStrings(apiCollections), Relationship.CONTAINS.ordinal());
+            .findFromBatch(
+                entityListToStrings(apiCollections),
+                Relationship.CONTAINS.ordinal(),
+                Entity.API_SERVICE,
+                Include.ALL);
+
+    if (records.isEmpty()) {
+      return serviceMap;
+    }
+
+    List<UUID> serviceIds =
+        records.stream().map(record -> UUID.fromString(record.getFromId())).distinct().toList();
+
+    Map<UUID, EntityReference> serviceRefMap =
+        Entity.getEntityReferencesByIds(Entity.API_SERVICE, serviceIds, Include.ALL).stream()
+            .collect(Collectors.toMap(EntityReference::getId, ref -> ref));
 
     for (CollectionDAO.EntityRelationshipObject record : records) {
       // We're looking for records where API Service contains API Collection
-      if (Entity.API_SERVICE.equals(record.getFromEntity())) {
-        UUID apiCollectionId = UUID.fromString(record.getToId());
-        EntityReference serviceRef =
-            Entity.getEntityReferenceById(
-                Entity.API_SERVICE, UUID.fromString(record.getFromId()), Include.NON_DELETED);
+      UUID apiCollectionId = UUID.fromString(record.getToId());
+      UUID serviceId = UUID.fromString(record.getFromId());
+      EntityReference serviceRef = serviceRefMap.get(serviceId);
+      if (serviceRef != null) {
         serviceMap.put(apiCollectionId, serviceRef);
       }
     }
@@ -175,7 +241,8 @@ public class APICollectionRepository extends EntityRepository<APICollection> {
   }
 
   private void populateService(APICollection apiCollection) {
-    ApiService service = Entity.getEntity(apiCollection.getService(), "", Include.NON_DELETED);
+    var service =
+        (ApiService) getCachedParentOrLoad(apiCollection.getService(), "", Include.NON_DELETED);
     apiCollection.setService(service.getEntityReference());
     apiCollection.setServiceType(service.getServiceType());
   }
@@ -189,7 +256,17 @@ public class APICollectionRepository extends EntityRepository<APICollection> {
     @Transaction
     @Override
     public void entitySpecificUpdate(boolean consolidatingChanges) {
-      recordChange("sourceHash", original.getSourceHash(), updated.getSourceHash());
+      compareAndUpdate(
+          "sourceHash",
+          () -> {
+            recordChange(
+                "sourceHash",
+                original.getSourceHash(),
+                updated.getSourceHash(),
+                false,
+                EntityUtil.objectMatch,
+                false);
+          });
     }
   }
 }

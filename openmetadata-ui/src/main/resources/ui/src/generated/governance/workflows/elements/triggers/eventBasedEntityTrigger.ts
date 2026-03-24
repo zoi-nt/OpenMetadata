@@ -1,5 +1,5 @@
 /*
- *  Copyright 2025 Collate.
+ *  Copyright 2026 Collate.
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
  *  You may obtain a copy of the License at
@@ -46,6 +46,11 @@ export interface TriggerConfiguration {
      * (applied to all entity types) or an object mapping entity types to their specific filters.
      */
     filter?: FilterConditionObject | string;
+    /**
+     * Array of field names that must be present in the change description to trigger the
+     * workflow. Takes priority over exclude fields.
+     */
+    include?: string[];
 }
 
 /**

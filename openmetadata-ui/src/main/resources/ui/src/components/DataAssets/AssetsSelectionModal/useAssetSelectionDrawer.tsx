@@ -23,6 +23,8 @@ interface UseAssetSelectionDrawerProps {
   type?: AssetsOfEntity;
   queryFilter?: QueryFilterInterface;
   emptyPlaceHolderText?: string;
+  infoBannerText?: string;
+  title?: string;
   onSave?: () => void;
   onCancel: () => void;
 }
@@ -33,6 +35,8 @@ export const useAssetSelectionDrawer = ({
   type = AssetsOfEntity.GLOSSARY,
   queryFilter,
   emptyPlaceHolderText,
+  infoBannerText,
+  title,
   onSave,
   onCancel,
 }: UseAssetSelectionDrawerProps) => {
@@ -49,6 +53,7 @@ export const useAssetSelectionDrawer = ({
     type,
     queryFilter,
     emptyPlaceHolderText,
+    infoBannerText,
     open,
     variant: 'drawer',
     onSave: handleSave,
@@ -57,13 +62,13 @@ export const useAssetSelectionDrawer = ({
 
   // Create the drawer - always mounted but content conditionally rendered
   const assetDrawer = useCompositeDrawer({
-    anchor: 'right',
     width: 670,
     closeOnEscape: false,
     testId: 'asset-selection-modal',
     onClose: onCancel,
     header: {
-      title: t('label.add-entity', { entity: t('label.asset-plural') }),
+      title:
+        title ?? t('label.add-entity', { entity: t('label.asset-plural') }),
       onClose: onCancel,
     },
     body: {

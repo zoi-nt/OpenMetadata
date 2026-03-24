@@ -24,9 +24,18 @@ import {
   redirectToHomePage,
   uuid,
 } from '../../utils/common';
-import { addMultiOwner, removeOwner } from '../../utils/entity';
+import {
+  addMultiOwner,
+  removeOwner,
+  waitForAllLoadersToDisappear,
+} from '../../utils/entity';
 import { sidebarClick } from '../../utils/sidebar';
-import { addTagToTableColumn, submitForm, validateForm } from '../../utils/tag';
+import {
+  addTagToTableColumn,
+  setTagDisabled,
+  submitForm,
+  validateForm,
+} from '../../utils/tag';
 
 const NEW_CLASSIFICATION = {
   name: `PlaywrightClassification-${uuid()}`,
@@ -38,13 +47,13 @@ const NEW_TAG = {
   displayName: `PlaywrightTag-${uuid()}`,
   renamedName: `PlaywrightTag-${uuid()}`,
   description: 'This is the PlaywrightTag',
-  color: '#FF5733',
-  icon: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAF8AAACFCAMAAAAKN9SOAAAAA1BMVEXmGSCqexgYAAAAI0lEQVRoge3BMQEAAADCoPVPbQwfoAAAAAAAAAAAAAAAAHgaMeAAAUWJHZ4AAAAASUVORK5CYII=',
+  color: '#F14C75',
+  icon: 'Cube01',
 };
 const tagFqn = `${NEW_CLASSIFICATION.name}.${NEW_TAG.name}`;
 
 const permanentDeleteModal = async (page: Page, entity: string) => {
-  await page.waitForSelector('.ant-modal-content', {
+  await page.locator('.ant-modal-content').waitFor({
     state: 'visible',
   });
 
@@ -121,11 +130,9 @@ test('Classification Page', async ({ page }) => {
     ).toBeVisible();
     await expect(page.locator('[data-testid="table"]')).toBeVisible();
 
-    const headers = await page
-      .locator('.ant-table-thead > tr > .ant-table-cell')
-      .allTextContents();
-
-    expect(headers).toEqual(['Tag', 'Display Name', 'Description', 'Actions']);
+    await expect(
+      page.locator('.ant-table-thead > tr > .ant-table-cell')
+    ).toHaveText(['Enabled', 'Tag', 'Display Name', 'Description', 'Actions']);
   });
 
   await test.step('Disabled system tags should not render', async () => {
@@ -161,10 +168,7 @@ test('Classification Page', async ({ page }) => {
     await expect(page.getByTestId('add-owner')).not.toBeVisible();
 
     await page.getByTestId(tag.responseData.name).click();
-    await page.waitForLoadState('networkidle');
-    await page.waitForSelector('[data-testid="loader"]', {
-      state: 'detached',
-    });
+    await waitForAllLoadersToDisappear(page);
 
     await expect(page.getByTestId('disabled')).toBeVisible();
     await expect(page.getByTestId('add-domain')).not.toBeVisible();
@@ -178,7 +182,9 @@ test('Classification Page', async ({ page }) => {
     );
 
     const tagResponse = page.waitForResponse(
-      `/api/v1/search/query?q=*${tag.responseData.displayName}***`
+      `/api/v1/search/query?q=*${encodeURIComponent(
+        tag.responseData.displayName
+      )}***`
     );
     await page.fill(
       '[data-testid="tag-selector"] input',
@@ -225,10 +231,7 @@ test('Classification Page', async ({ page }) => {
     await expect(page.getByTestId('add-owner')).toBeVisible();
 
     await page.getByTestId(tag.responseData.name).click();
-    await page.waitForLoadState('networkidle');
-    await page.waitForSelector('[data-testid="loader"]', {
-      state: 'detached',
-    });
+    await waitForAllLoadersToDisappear(page);
 
     await expect(page.getByTestId('disabled')).not.toBeVisible();
     await expect(page.getByTestId('add-domain')).toBeVisible();
@@ -250,11 +253,8 @@ test('Classification Page', async ({ page }) => {
     await redirectToHomePage(page);
     await classification.visitPage(page);
     await page.click('[data-testid="add-classification"]');
-    await page.waitForSelector('.ant-modal-content', {
-      state: 'visible',
-    });
 
-    await expect(page.locator('.ant-modal-content')).toBeVisible();
+    await expect(page.getByTestId('tags-form')).toBeVisible();
 
     await validateForm(page);
 
@@ -289,19 +289,20 @@ test('Classification Page', async ({ page }) => {
 
     await page.click('[data-testid="add-new-tag-button"]');
 
-    await page.waitForSelector('.ant-modal-content', {
-      state: 'visible',
-    });
-
-    await expect(page.locator('.ant-modal-content')).toBeVisible();
+    await expect(page.getByTestId('tags-form')).toBeVisible();
 
     await validateForm(page);
 
     await page.fill('[data-testid="name"]', NEW_TAG.name);
     await page.fill('[data-testid="displayName"]', NEW_TAG.displayName);
     await page.locator(descriptionBox).fill(NEW_TAG.description);
-    await page.fill('[data-testid="icon-url"]', NEW_TAG.icon);
-    await page.fill('[data-testid="tags_color-color-input"]', NEW_TAG.color);
+    await page.getByTestId('icon-picker-btn').click();
+    await page
+      .getByRole('button', { name: `Select icon ${NEW_TAG.icon}` })
+      .click();
+    await page
+      .getByRole('button', { name: `Select color ${NEW_TAG.color}` })
+      .click();
 
     const createTagResponse = page.waitForResponse('api/v1/tags');
     await submitForm(page);
@@ -333,7 +334,11 @@ test('Classification Page', async ({ page }) => {
   });
 
   await test.step(`Assign tag to table`, async () => {
+    const columnResponse = page.waitForResponse(
+      `/api/v1/tables/name/${table.entityResponseData?.['fullyQualifiedName']}/columns?*`
+    );
     await table.visitEntityPage(page);
+    const columnData = await columnResponse.then((res) => res.json());
     const { name, displayName } = NEW_TAG;
 
     await addTagToTableColumn(page, {
@@ -341,103 +346,96 @@ test('Classification Page', async ({ page }) => {
       tagFqn,
       tagDisplayName: displayName,
       columnNumber: 0,
-      rowName: `${table.entity?.columns[0].name} numeric`,
+      rowName: columnData.data?.[0]?.name,
     });
   });
 
-  await test.step(
-    'Assign tag using Task & Suggestion flow to DatabaseSchema',
-    async () => {
-      const entity = table.schema;
-      const tag = 'Personal';
-      const assignee = 'admin';
+  await test.step('Assign tag using Task & Suggestion flow to DatabaseSchema', async () => {
+    const entity = table.schema;
+    const tag = 'Personal';
+    const assignee = 'admin';
 
-      const databaseSchemaPage = page.waitForResponse(
-        'api/v1/databaseSchemas/name/*'
-      );
-      const permissions = page.waitForResponse(
-        'api/v1/permissions/databaseSchema/name/*'
-      );
-      await page.click(
-        `[data-testid="breadcrumb-link"]:has-text("${entity.name}")`
-      );
+    const databaseSchemaPage = page.waitForResponse(
+      'api/v1/databaseSchemas/name/*'
+    );
+    const permissions = page.waitForResponse(
+      'api/v1/permissions/databaseSchema/name/*'
+    );
+    await page.click(
+      `[data-testid="breadcrumb-link"]:has-text("${entity.name}")`
+    );
 
-      await databaseSchemaPage;
-      await permissions;
+    await databaseSchemaPage;
+    await permissions;
 
-      await page.click('[data-testid="request-entity-tags"]');
+    await page.click('[data-testid="request-entity-tags"]');
 
-      await page.click('[data-testid="select-assignee"]');
-      const assigneeResponse = page.waitForResponse(
-        '/api/v1/search/query?q=*&index=user_search_index*team_search_index*'
-      );
-      await page.keyboard.type(assignee);
-      await page.click(`[data-testid="${assignee}"]`);
-      await assigneeResponse;
+    await page.click('[data-testid="select-assignee"]');
+    const assigneeResponse = page.waitForResponse(
+      '/api/v1/search/query?q=*&index=user*team*'
+    );
+    await page.keyboard.type(assignee);
+    await page.click(`[data-testid="${assignee}"]`);
+    await assigneeResponse;
 
-      await clickOutside(page);
+    await clickOutside(page);
 
-      const suggestTag = page.waitForResponse(
-        'api/v1/search/query?q=*&index=tag_search_index*'
-      );
-      await page.click('[data-testid="tag-selector"]');
-      await page.keyboard.type(tag);
-      await suggestTag;
-      await page.click('[data-testid="tag-PersonalData.Personal"]');
+    const suggestTag = page.waitForResponse(
+      'api/v1/search/query?q=*&index=tag*'
+    );
+    await page.click('[data-testid="tag-selector"]');
+    await page.keyboard.type(tag);
+    await suggestTag;
+    await page.click('[data-testid="tag-PersonalData.Personal"]');
 
-      await page.click('[data-testid="tags-label"]');
-      const taskCreated = page.waitForResponse(
-        (response) =>
-          response.request().method() === 'POST' &&
-          response.url().includes('api/v1/feed')
-      );
-      await page.click('[data-testid="submit-tag-request"]');
-      await taskCreated;
+    await page.click('[data-testid="tags-label"]');
+    const taskCreated = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'POST' &&
+        response.url().includes('api/v1/feed')
+    );
+    await page.click('[data-testid="submit-tag-request"]');
+    await taskCreated;
 
-      const acceptSuggestion = page.waitForResponse(
-        (response) =>
-          response.request().method() === 'PUT' &&
-          response.url().includes('/api/v1/feed/tasks/') &&
-          response.url().includes('/resolve')
-      );
+    const acceptSuggestion = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'PUT' &&
+        response.url().includes('/api/v1/feed/tasks/') &&
+        response.url().includes('/resolve')
+    );
 
-      const acceptButton = page.locator(
-        '.ant-btn-compact-first-item:has-text("Accept Suggestion")'
-      );
-      await acceptButton.waitFor({ state: 'visible' });
-      await acceptButton.click();
-      await acceptSuggestion;
-      await page.click('[data-testid="table"]');
+    const acceptButton = page.locator(
+      '.ant-btn-compact-first-item:has-text("Accept Suggestion")'
+    );
+    await acceptButton.waitFor({ state: 'visible' });
+    await acceptButton.click();
+    await acceptSuggestion;
+    await page.click('[data-testid="table"]');
 
-      const databaseSchemasPage = page.waitForResponse(
-        'api/v1/databaseSchemas/name/*'
-      );
-      await page.reload();
-      await databaseSchemasPage;
+    const databaseSchemasPage = page.waitForResponse(
+      'api/v1/databaseSchemas/name/*'
+    );
+    await page.reload();
+    await databaseSchemasPage;
 
-      await page.waitForLoadState('networkidle');
+    await waitForAllLoadersToDisappear(page);
 
-      await page.waitForSelector('[data-testid="loader"]', {
-        state: 'detached',
-      });
+    await expect(page.locator('[data-testid="tags-container"]')).toContainText(
+      tag
+    );
 
-      await expect(
-        page.locator('[data-testid="tags-container"]')
-      ).toContainText(tag);
+    await page.click('[data-testid="edit-button"]');
 
-      await page.click('[data-testid="edit-button"]');
+    await page.click('[data-testid="remove-tags"]');
 
-      await page.click('[data-testid="remove-tags"]');
-
-      const removeTags = page.waitForResponse(
-        (response) =>
-          response.request().method() === 'PATCH' &&
-          response.url().includes('/api/v1/databaseSchemas/')
-      );
-      await page.click('[data-testid="saveAssociatedTag"]');
-      await removeTags;
-    }
-  );
+    const removeTags = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'PATCH' &&
+        response.url().includes('/api/v1/databaseSchemas/')
+    );
+    await page.click('[data-testid="saveAssociatedTag"]');
+    await removeTags;
+  });
 
   await test.step('Delete tag', async () => {
     const getTags = page.waitForResponse('/api/v1/tags*');
@@ -461,7 +459,7 @@ test('Classification Page', async ({ page }) => {
     );
 
     await page.click('[data-testid="table"] [data-testid="delete-tag"]');
-    await page.waitForTimeout(500); // adding manual wait to open modal, as it depends on click not an api.
+    await page.locator('.ant-modal-content').waitFor({ state: 'visible' });
     const deleteTag = page.waitForResponse(
       (response) =>
         response.request().method() === 'DELETE' &&
@@ -469,7 +467,6 @@ test('Classification Page', async ({ page }) => {
     );
     await permanentDeleteModal(page, NEW_TAG.name);
     await deleteTag;
-    await page.waitForTimeout(500);
 
     await expect(page.locator('[data-testid="table"]')).not.toContainText(
       NEW_TAG.name
@@ -477,13 +474,10 @@ test('Classification Page', async ({ page }) => {
 
     // Verify term count is now 0 after deleting the tag
     await page.reload();
-    await page.waitForLoadState('networkidle');
 
-    await page.waitForSelector('[data-testid="loader"]', {
-      state: 'detached',
-    });
+    await waitForAllLoadersToDisappear(page);
 
-    await page.waitForSelector('[data-testid="side-panel-classification"]', {
+    await page.getByTestId('side-panel-classification').first().waitFor({
       state: 'visible',
     });
 
@@ -518,8 +512,6 @@ test('Classification Page', async ({ page }) => {
     await page.click('[data-testid="confirm-button"]');
     await deleteClassification;
 
-    await page.waitForLoadState('networkidle');
-
     await expect(
       page
         .locator('[data-testid="data-summary-container"]')
@@ -534,8 +526,6 @@ test('Search tag using classification display name should work', async ({
   const displayNameToSearch = tag.responseData.classification.displayName;
 
   await table.visitEntityPage(page);
-
-  await page.waitForLoadState('networkidle');
 
   const initialQueryResponse = page.waitForResponse('**/api/v1/search/query?*');
 
@@ -590,7 +580,7 @@ test('Verify system classification term counts', async ({ page }) => {
 
   await classificationsResponse;
 
-  await page.waitForSelector('[data-testid="side-panel-classification"]', {
+  await page.getByTestId('side-panel-classification').first().waitFor({
     state: 'visible',
   });
 
@@ -659,15 +649,12 @@ test('Verify Owner Add Delete', async ({ page }) => {
   });
 
   await page.getByTestId(tag1.data.name).click();
-  await page.waitForLoadState('networkidle');
 
   await expect(
     page.locator(`[data-testid="owner-link"]`).getByTestId(OWNER1)
   ).toBeVisible();
 
   await classification1.visitPage(page);
-
-  await page.waitForLoadState('networkidle');
 
   await removeOwner({
     page,
@@ -676,4 +663,40 @@ test('Verify Owner Add Delete', async ({ page }) => {
     type: 'Users',
     dataTestId: 'classification-owner-name',
   });
+});
+
+test('Disabled tag should not allow adding assets from Assets tab', async ({
+  browser,
+  page,
+}) => {
+  const { apiContext, afterAction } = await createNewPage(browser);
+
+  try {
+    // Disable the tag via API
+    await setTagDisabled(apiContext, tag1.responseData.id, true);
+
+    // Visit the disabled tag page
+    await tag1.visitPage(page);
+
+    await page
+      .getByTestId('tags-container')
+      .getByTestId('loader')
+      .first()
+      .waitFor({ state: 'detached' });
+
+    // Verify the disabled badge is visible
+    await expect(page.getByTestId('disabled')).toBeVisible();
+
+    // Go to Assets tab
+    await page.getByTestId('assets').click();
+
+    // Verify the "Add Assets" button is NOT visible for disabled tag
+    await expect(
+      page.getByTestId('data-classification-add-button')
+    ).not.toBeVisible();
+  } finally {
+    // Re-enable the tag for cleanup
+    await setTagDisabled(apiContext, tag1.responseData.id, false);
+    await afterAction();
+  }
 });

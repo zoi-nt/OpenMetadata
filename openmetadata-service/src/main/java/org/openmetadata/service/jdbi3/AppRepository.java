@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import lombok.extern.slf4j.Slf4j;
 import org.openmetadata.schema.api.teams.CreateUser;
@@ -35,10 +36,12 @@ import org.openmetadata.service.exception.EntityNotFoundException;
 import org.openmetadata.service.resources.apps.AppResource;
 import org.openmetadata.service.security.jwt.JWTTokenGenerator;
 import org.openmetadata.service.util.EntityUtil;
+import org.openmetadata.service.util.EntityUtil.RelationIncludes;
 
 @Slf4j
 public class AppRepository extends EntityRepository<App> {
   public static final String APP_BOT_ROLE = "ApplicationBotRole";
+  public static final String APP_BOT_IMPERSONATION_ROLE = "ApplicationBotImpersonationRole";
 
   public static final String UPDATE_FIELDS = "appConfiguration,appSchedule";
 
@@ -56,7 +59,7 @@ public class AppRepository extends EntityRepository<App> {
   }
 
   @Override
-  public void setFields(App entity, EntityUtil.Fields fields) {
+  public void setFields(App entity, EntityUtil.Fields fields, RelationIncludes relationIncludes) {
     entity.setPipelines(
         fields.contains("pipelines") ? getIngestionPipelines(entity) : entity.getPipelines());
     entity.withBot(getBotUser(entity));
@@ -77,9 +80,30 @@ public class AppRepository extends EntityRepository<App> {
   }
 
   @Override
-  public void prepare(App entity, boolean update) {}
+  public void prepare(App entity, boolean update) {
+    // Encrypt sensitive fields in appConfiguration before saving
+    if (entity.getAppConfiguration() != null && entity.getClassName() != null) {
+      try {
+        org.openmetadata.service.apps.ApplicationHandler handler =
+            org.openmetadata.service.apps.ApplicationHandler.getInstance();
+        if (handler != null) {
+          App encryptedApp =
+              handler.appWithEncryptedAppConfiguration(
+                  entity, Entity.getCollectionDAO(), Entity.getSearchRepository());
+          entity.setAppConfiguration(encryptedApp.getAppConfiguration());
+        }
+      } catch (Exception e) {
+        LOG.debug(
+            "Could not encrypt app configuration for {}: {}", entity.getName(), e.getMessage());
+      }
+    }
+  }
 
   public EntityReference createNewAppBot(App application) {
+    return createNewAppBot(application, false);
+  }
+
+  public EntityReference createNewAppBot(App application, boolean allowImpersonation) {
     String botName = String.format("%sBot", application.getName());
     BotRepository botRepository = (BotRepository) Entity.getEntityRepository(Entity.BOT);
     UserRepository userRepository = (UserRepository) Entity.getEntityRepository(Entity.USER);
@@ -88,9 +112,10 @@ public class AppRepository extends EntityRepository<App> {
     try {
       botUser = userRepository.getByName(null, botName, userRepository.getFields("id"));
     } catch (EntityNotFoundException ex) {
-      // Get Bot Role
+      // Get Bot Role - use impersonation role if allowImpersonation is true
+      String roleName = allowImpersonation ? APP_BOT_IMPERSONATION_ROLE : APP_BOT_ROLE;
       EntityReference roleRef =
-          Entity.getEntityReferenceByName(Entity.ROLE, APP_BOT_ROLE, Include.NON_DELETED);
+          Entity.getEntityReferenceByName(Entity.ROLE, roleName, Include.NON_DELETED);
       // Create Bot User
       AuthenticationMechanism authMechanism =
           new AuthenticationMechanism()
@@ -109,6 +134,7 @@ public class AppRepository extends EntityRepository<App> {
 
       // Set User Ownership to the application creator
       user.setOwners(application.getOwners());
+      user.setAllowImpersonation(allowImpersonation);
 
       // Set Auth Mechanism in Bot
       JWTAuthMechanism jwtAuthMechanism = (JWTAuthMechanism) authMechanism.getConfig();
@@ -150,14 +176,18 @@ public class AppRepository extends EntityRepository<App> {
   }
 
   @Override
+  protected List<String> getFieldsStrippedFromStorageJson() {
+    return List.of("bot");
+  }
+
+  @Override
   public void storeEntity(App entity, boolean update) {
-    List<EntityReference> ownerRefs = entity.getOwners();
-    EntityReference bot = entity.getBot();
-    entity.withOwners(null);
-    entity.withBot(null);
     store(entity, update);
-    entity.withOwners(ownerRefs);
-    entity.setBot(bot);
+  }
+
+  @Override
+  public void storeEntities(List<App> entities) {
+    storeMany(entities);
   }
 
   public EntityReference getBotUser(App application) {
@@ -194,6 +224,13 @@ public class AppRepository extends EntityRepository<App> {
         });
 
     return botsMap;
+  }
+
+  @Override
+  protected void clearEntitySpecificRelationshipsForMany(List<App> entities) {
+    if (entities.isEmpty()) return;
+    List<UUID> ids = entities.stream().map(App::getId).toList();
+    deleteFromMany(ids, Entity.APPLICATION, Relationship.CONTAINS, Entity.BOT);
   }
 
   @Override
@@ -245,6 +282,16 @@ public class AppRepository extends EntityRepository<App> {
 
   public AppRunRecord getLatestAppRuns(App app, UUID service) {
     return getLatestExtensionById(
+        app, AppRunRecord.class, AppExtension.ExtensionType.STATUS, service);
+  }
+
+  public Optional<AppRunRecord> getLatestAppRunsOptional(App app) {
+    return getLatestExtensionByIdOptional(
+        app, AppRunRecord.class, AppExtension.ExtensionType.STATUS, null);
+  }
+
+  public Optional<AppRunRecord> getLatestAppRunsOptional(App app, UUID service) {
+    return getLatestExtensionByIdOptional(
         app, AppRunRecord.class, AppExtension.ExtensionType.STATUS, service);
   }
 
@@ -395,14 +442,20 @@ public class AppRepository extends EntityRepository<App> {
 
   public <T> T getLatestExtensionById(
       App app, Class<T> clazz, AppExtension.ExtensionType extensionType, UUID service) {
+    return getLatestExtensionByIdOptional(app, clazz, extensionType, service)
+        .orElseThrow(() -> AppException.byExtension(extensionType));
+  }
+
+  public <T> Optional<T> getLatestExtensionByIdOptional(
+      App app, Class<T> clazz, AppExtension.ExtensionType extensionType, UUID service) {
     List<String> result =
         daoCollection
             .appExtensionTimeSeriesDao()
             .listAppExtension(app.getId().toString(), 1, 0, extensionType.toString(), service);
     if (nullOrEmpty(result)) {
-      throw AppException.byExtension(extensionType);
+      return Optional.empty();
     }
-    return JsonUtils.readValue(result.get(0), clazz);
+    return Optional.of(JsonUtils.readValue(result.get(0), clazz));
   }
 
   public <T> T getLatestExtensionAfterStartTimeByName(
@@ -507,12 +560,30 @@ public class AppRepository extends EntityRepository<App> {
 
     @Override
     public void entitySpecificUpdate(boolean consolidatingChanges) {
-      recordChange(
-          "appConfiguration", original.getAppConfiguration(), updated.getAppConfiguration());
-      recordChange("appSchedule", original.getAppSchedule(), updated.getAppSchedule());
-      recordChange("bot", original.getBot(), updated.getBot());
-      recordChange(
-          "eventSubscriptions", original.getEventSubscriptions(), updated.getEventSubscriptions());
+      compareAndUpdate(
+          "appConfiguration",
+          () -> {
+            recordChange(
+                "appConfiguration", original.getAppConfiguration(), updated.getAppConfiguration());
+          });
+      compareAndUpdate(
+          "appSchedule",
+          () -> {
+            recordChange("appSchedule", original.getAppSchedule(), updated.getAppSchedule());
+          });
+      compareAndUpdate(
+          "bot",
+          () -> {
+            recordChange("bot", original.getBot(), updated.getBot());
+          });
+      compareAndUpdate(
+          "eventSubscriptions",
+          () -> {
+            recordChange(
+                "eventSubscriptions",
+                original.getEventSubscriptions(),
+                updated.getEventSubscriptions());
+          });
     }
   }
 }

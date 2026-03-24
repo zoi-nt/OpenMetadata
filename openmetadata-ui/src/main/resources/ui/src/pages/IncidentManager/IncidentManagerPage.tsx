@@ -10,11 +10,13 @@
  *  See the License for the specific language governing permissions and
  *  limitations under the License.
  */
-import { Col, Row, Typography } from 'antd';
+import { Card, Col, Row } from 'antd';
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import IncidentManager from '../../components/IncidentManager/IncidentManager.component';
+import PageHeader from '../../components/PageHeader/PageHeader.component';
 import PageLayoutV1 from '../../components/PageLayoutV1/PageLayoutV1';
+import { LEARNING_PAGE_IDS } from '../../constants/Learning.constants';
 import { PAGE_HEADERS } from '../../constants/PageHeaders.constant';
 import incidentManagerClassBase from './IncidentManagerClassBase';
 
@@ -25,21 +27,24 @@ const IncidentManagerPage = () => {
     []
   );
 
+  const pageHeaderData = useMemo(
+    () => ({
+      header: t(PAGE_HEADERS.INCIDENT_MANAGER.header),
+      subHeader: t(PAGE_HEADERS.INCIDENT_MANAGER.subHeader),
+    }),
+    [t]
+  );
+
   return (
     <PageLayoutV1 pageTitle={t('label.incident-manager')}>
-      <Row gutter={[0, 16]}>
+      <Row className="m-t-xs" gutter={[0, 16]}>
         <Col span={24}>
-          <Typography.Title
-            className="m-b-md"
-            data-testid="page-title"
-            level={5}>
-            {t(PAGE_HEADERS.INCIDENT_MANAGER.header)}
-          </Typography.Title>
-          <Typography.Paragraph
-            className="text-grey-muted"
-            data-testid="page-sub-title">
-            {t(PAGE_HEADERS.INCIDENT_MANAGER.subHeader)}
-          </Typography.Paragraph>
+          <Card>
+            <PageHeader
+              data={pageHeaderData}
+              learningPageId={LEARNING_PAGE_IDS.INCIDENT_MANAGER}
+            />
+          </Card>
         </Col>
 
         {WidgetComponent && (

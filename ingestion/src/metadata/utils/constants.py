@@ -118,6 +118,10 @@ NO_ACCESS_TOKEN = "no_token"
 
 SAMPLE_DATA_DEFAULT_COUNT = 50
 
+# Max length for any individual cell value in sample data.
+# Prevents OOM when tables contain large TEXT/CLOB columns.
+SAMPLE_DATA_MAX_CELL_LENGTH = 5_000
+
 ENTITY_REFERENCE_CLASS_MAP = {
     # Service Entities
     "databaseService": DatabaseService,
@@ -178,3 +182,6 @@ NON_SQA_DATABASE_CONNECTIONS = (
     SapErpType.SapErp.value,
     SasType.SAS.value,
 )
+
+# Size Conversion
+BYTES_PER_MB = 1024 * 1024

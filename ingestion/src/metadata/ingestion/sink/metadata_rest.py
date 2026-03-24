@@ -15,7 +15,7 @@ to the OM API.
 """
 import traceback
 from functools import singledispatchmethod
-from typing import Any, Dict, Optional, TypeVar, Union
+from typing import Any, Dict, List, Optional, TypeVar, Union
 
 from pydantic import BaseModel
 from requests.exceptions import HTTPError
@@ -24,10 +24,17 @@ from metadata.config.common import ConfigModel
 from metadata.data_quality.api.models import TestCaseResultResponse, TestCaseResults
 from metadata.generated.schema.analytics.reportData import ReportData
 from metadata.generated.schema.api.data.createContainer import CreateContainerRequest
+from metadata.generated.schema.api.data.createDashboardDataModel import (
+    CreateDashboardDataModelRequest,
+)
 from metadata.generated.schema.api.data.createDataContract import (
     CreateDataContractRequest,
 )
+from metadata.generated.schema.api.data.createGlossary import CreateGlossaryRequest
 from metadata.generated.schema.api.data.createPipeline import CreatePipelineRequest
+from metadata.generated.schema.api.domains.createDataProduct import (
+    CreateDataProductRequest,
+)
 from metadata.generated.schema.api.domains.createDomain import CreateDomainRequest
 from metadata.generated.schema.api.lineage.addLineage import AddLineageRequest
 from metadata.generated.schema.api.teams.createRole import CreateRoleRequest
@@ -37,6 +44,9 @@ from metadata.generated.schema.api.tests.createLogicalTestCases import (
     CreateLogicalTestCases,
 )
 from metadata.generated.schema.api.tests.createTestCase import CreateTestCaseRequest
+from metadata.generated.schema.api.tests.createTestDefinition import (
+    CreateTestDefinitionRequest,
+)
 from metadata.generated.schema.api.tests.createTestSuite import CreateTestSuiteRequest
 from metadata.generated.schema.dataInsight.kpi.basic import KpiResult
 from metadata.generated.schema.entity.classification.tag import Tag
@@ -47,7 +57,7 @@ from metadata.generated.schema.entity.data.searchIndex import (
     SearchIndex,
     SearchIndexSampleData,
 )
-from metadata.generated.schema.entity.data.table import DataModel, Table
+from metadata.generated.schema.entity.data.table import DataModel, Table, TableData
 from metadata.generated.schema.entity.data.topic import TopicSampleData
 from metadata.generated.schema.entity.datacontract.dataContractResult import (
     DataContractResult,
@@ -80,9 +90,13 @@ from metadata.ingestion.models.patch_request import (
     PatchedEntity,
     PatchRequest,
 )
-from metadata.ingestion.models.pipeline_status import OMetaPipelineStatus
+from metadata.ingestion.models.pipeline_status import (
+    OMetaBulkPipelineStatus,
+    OMetaPipelineStatus,
+)
 from metadata.ingestion.models.profile_data import OMetaTableProfileSampleData
 from metadata.ingestion.models.search_index_data import OMetaIndexSampleData
+from metadata.ingestion.models.table_metadata import ColumnTag
 from metadata.ingestion.models.tests_data import (
     OMetaLogicalTestSuiteSample,
     OMetaTestCaseResolutionStatus,
@@ -99,6 +113,7 @@ from metadata.ingestion.source.pipeline.pipeline_service import (
     PipelineUsage,
     TablePipelineObservability,
 )
+from metadata.pii.types import ClassifiableEntityType
 from metadata.profiler.api.models import ProfilerResponse
 from metadata.sampler.models import SamplerResponse
 from metadata.utils.execution_time_tracker import calculate_execution_time
@@ -140,6 +155,9 @@ class MetadataRestSink(Sink):  # pylint: disable=too-many-public-methods
         self.buffer: list[BaseModel] = []
         self.deferred_lifecycle_records: list[OMetaLifeCycleData] = []
         self.deferred_lifecycle_processed = False
+        # Track entity names in buffer for O(1) duplicate checking
+        # Key: (entity_type, name), Value: True
+        self.buffered_entity_names: Dict[tuple, bool] = {}
 
     @classmethod
     def create(
@@ -201,15 +219,36 @@ class MetadataRestSink(Sink):  # pylint: disable=too-many-public-methods
                 entity_request,
                 (
                     CreateDomainRequest,
+                    CreateDataProductRequest,
                     CreateDataContractRequest,
                     CreateTeamRequest,
                     CreateContainerRequest,
                     CreatePipelineRequest,
                     CreateTestCaseRequest,
+                    CreateTestSuiteRequest,
+                    CreateTestDefinitionRequest,
+                    CreateGlossaryRequest,
                 ),
             )
         ):
             return self.write_create_single_request(entity_request)
+
+        # Deduplicate entities by name to avoid duplicate FQN hash errors
+        # These are CreateRequest types that may have duplicate names from source systems
+        if isinstance(
+            entity_request,
+            (
+                CreateDashboardDataModelRequest,  # QuickSight: multiple tables with same DataSourceId
+            ),
+        ):
+            if self._is_duplicate_in_buffer(entity_request):
+                logger.debug(
+                    f"Skipping duplicate {type(entity_request).__name__} with name: {entity_request.name.root}"
+                )
+                return Either(right=None)
+
+            # Track this entity for future duplicate checks (only for types that need deduplication)
+            self._track_entity_in_buffer(entity_request)
 
         self.buffer.append(entity_request)
         try:
@@ -225,6 +264,41 @@ class MetadataRestSink(Sink):  # pylint: disable=too-many-public-methods
                     stackTrace=None,
                 )
             )
+
+    def _track_entity_in_buffer(self, entity_request) -> None:
+        """
+        Track an entity name in the buffer for O(1) duplicate detection.
+        Only called for entity types that require deduplication.
+        """
+        if not hasattr(entity_request, "name"):
+            return
+
+        entity_type = type(entity_request).__name__
+        current_name = (
+            entity_request.name.root
+            if hasattr(entity_request.name, "root")
+            else entity_request.name
+        )
+
+        self.buffered_entity_names[(entity_type, current_name)] = True
+
+    def _is_duplicate_in_buffer(self, entity_request) -> bool:
+        """
+        Check if an entity with the same name already exists in the buffer.
+        Uses O(1) lookup via buffered_entity_names dict.
+        """
+        if not hasattr(entity_request, "name"):
+            return False
+
+        entity_type = type(entity_request).__name__
+        current_name = (
+            entity_request.name.root
+            if hasattr(entity_request.name, "root")
+            else entity_request.name
+        )
+
+        # O(1) lookup
+        return (entity_type, current_name) in self.buffered_entity_names
 
     def write_create_single_request(self, entity_request) -> Either[Entity]:
         try:
@@ -278,7 +352,10 @@ class MetadataRestSink(Sink):  # pylint: disable=too-many-public-methods
                 right=None,
             )
 
+        # Clear buffer and tracking set
         self.buffer = []
+        self.buffered_entity_names.clear()
+
         if result and result.status == basic.Status.success:
             self.status.scanned_all(result.successRequest)
             return Either(right=result, left=None)
@@ -368,6 +445,18 @@ class MetadataRestSink(Sink):  # pylint: disable=too-many-public-methods
         self, record: OMetaTagAndClassification
     ) -> Either[Tag]:
         """PUT Classification and Tag to OM API"""
+        tag_name = (
+            record.tag_request.name.root
+            if hasattr(record.tag_request.name, "root")
+            else str(record.tag_request.name)
+        )
+        if not tag_name or not tag_name.strip():
+            logger.warning(
+                f"Skipping tag with empty name for classification "
+                f"'{record.classification_request.name}'"
+            )
+            return Either(right=None)
+
         self.metadata.create_or_update(record.classification_request)
         tag = self.metadata.create_or_update(record.tag_request)
         return Either(right=tag)
@@ -566,6 +655,15 @@ class MetadataRestSink(Sink):  # pylint: disable=too-many-public-methods
         return Either(right=pipeline)
 
     @_run_dispatch.register
+    def write_bulk_pipeline_status(
+        self, record: OMetaBulkPipelineStatus
+    ) -> Either[Pipeline]:
+        pipeline = self.metadata.add_bulk_pipeline_status(
+            fqn=record.pipeline_fqn, statuses=record.pipeline_statuses
+        )
+        return Either(right=pipeline)
+
+    @_run_dispatch.register
     def write_profile_sample_data(
         self, record: OMetaTableProfileSampleData
     ) -> Either[Table]:
@@ -707,40 +805,114 @@ class MetadataRestSink(Sink):  # pylint: disable=too-many-public-methods
         self.deferred_lifecycle_records.append(record)
         return Either(right=None)
 
-    @_run_dispatch.register
-    def write_sampler_response(self, record: SamplerResponse) -> Either[Table]:
-        """Ingest the sample data - if needed - and the PII tags"""
-        if record.sample_data and record.sample_data.store:
-            table_data = self.metadata.ingest_table_sample_data(
-                table=record.table, sample_data=record.sample_data.data
+    @singledispatchmethod
+    def _ingest_entity_sample_data(self, entity, sample_data):
+        """
+        Generic dispatcher for ingesting sample data for any classifiable entity.
+        Uses singledispatchmethod for polymorphic dispatch based on entity type.
+
+        Args:
+            entity: The classifiable entity
+            sample_data: Sample data to ingest
+
+        Returns:
+            bool: Success status
+
+        Raises:
+            NotImplementedError: If entity type is not supported
+        """
+        raise NotImplementedError(
+            f"Sample data ingestion not implemented for entity type {type(entity).__name__}"
+        )
+
+    @_ingest_entity_sample_data.register
+    def _(self, entity: Table, sample_data: TableData) -> bool:
+        """Table-specific sample data ingestion implementation"""
+        table_data = self.metadata.ingest_table_sample_data(
+            table=entity, sample_data=sample_data
+        )
+        if table_data:
+            logger.debug(
+                f"Successfully ingested sample data for {entity.fullyQualifiedName.root}"
             )
-            if not table_data:
+            return True
+        return False
+
+    @singledispatchmethod
+    def _patch_entity_column_tags(self, entity, column_tags: List[ColumnTag]):
+        """
+        Generic dispatcher for patching column tags on any classifiable entity.
+        Uses singledispatchmethod for polymorphic dispatch based on entity type.
+
+        Args:
+            entity: The classifiable entity
+            column_tags: Column tags to patch
+
+        Returns:
+            bool: Success status
+
+        Raises:
+            NotImplementedError: If entity type is not supported
+        """
+        raise NotImplementedError(
+            f"Column tag patching not implemented for entity type {type(entity).__name__}"
+        )
+
+    @_patch_entity_column_tags.register
+    def _(self, entity: Table, column_tags: List[ColumnTag]) -> bool:
+        """Table-specific column tag patching implementation"""
+        patched = self.metadata.patch_column_tags(table=entity, column_tags=column_tags)
+        if patched:
+            logger.debug(
+                f"Successfully patched tags for {entity.fullyQualifiedName.root}"
+            )
+            return True
+        return False
+
+    @_run_dispatch.register
+    def write_sampler_response(
+        self, record: SamplerResponse
+    ) -> Either[ClassifiableEntityType]:
+        """Ingest the sample data - if needed - and the PII tags"""
+        entity = record.entity
+
+        if record.sample_data and record.sample_data.store:
+            try:
+                success = self._ingest_entity_sample_data(
+                    entity, sample_data=record.sample_data.data
+                )
+                if not success:
+                    self.status.failed(
+                        StackTraceError(
+                            name=entity.fullyQualifiedName.root,
+                            error="Error trying to ingest sample data for entity",
+                        )
+                    )
+            except NotImplementedError as exc:
                 self.status.failed(
                     StackTraceError(
-                        name=record.table.fullyQualifiedName.root,
-                        error="Error trying to ingest sample data for table",
+                        name=entity.fullyQualifiedName.root,
+                        error=str(exc),
                     )
-                )
-            else:
-                logger.debug(
-                    f"Successfully ingested sample data for {record.table.fullyQualifiedName.root}"
                 )
 
         if record.column_tags:
-            patched = self.metadata.patch_column_tags(
-                table=record.table, column_tags=record.column_tags
-            )
-            if not patched:
-                self.status.warning(
-                    key=record.table.fullyQualifiedName.root,
-                    reason="Error patching tags for table",
+            try:
+                success = self._patch_entity_column_tags(
+                    entity, column_tags=record.column_tags
                 )
-            else:
-                logger.debug(
-                    f"Successfully patched tag {record.column_tags} for {record.table.fullyQualifiedName.root}"
+                if not success:
+                    self.status.warning(
+                        key=entity.fullyQualifiedName.root,
+                        reason="Error patching tags for entity",
+                    )
+            except NotImplementedError as exc:
+                self.status.warning(
+                    key=entity.fullyQualifiedName.root,
+                    reason=str(exc),
                 )
 
-        return Either(right=record.table)
+        return Either(right=record.entity)
 
     @_run_dispatch.register
     def write_profiler_response(self, record: ProfilerResponse) -> Either[Table]:

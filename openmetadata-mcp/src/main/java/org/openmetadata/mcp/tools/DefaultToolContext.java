@@ -39,59 +39,92 @@ public class DefaultToolContext {
     Map<String, Object> params = request.arguments();
     Object result;
     try {
+      McpTool tool;
       switch (toolName) {
         case "search_metadata":
-          result = new SearchMetadataTool().execute(authorizer, securityContext, params);
+          tool = new SearchMetadataTool();
+          result = tool.execute(authorizer, securityContext, params);
+          break;
+        case "semantic_search":
+          result = new SemanticSearchTool().execute(authorizer, securityContext, params);
           break;
         case "get_entity_details":
-          result = new GetEntityTool().execute(authorizer, securityContext, params);
+          tool = new GetEntityTool();
+          result = tool.execute(authorizer, securityContext, params);
           break;
         case "create_glossary":
-          result = new GlossaryTool().execute(authorizer, limits, securityContext, params);
+          tool = new GlossaryTool();
+          result = tool.execute(authorizer, limits, securityContext, params);
           break;
         case "create_glossary_term":
-          result = new GlossaryTermTool().execute(authorizer, limits, securityContext, params);
+          tool = new GlossaryTermTool();
+          result = tool.execute(authorizer, limits, securityContext, params);
           break;
         case "patch_entity":
-          result = new PatchEntityTool().execute(authorizer, securityContext, params);
+          tool = new PatchEntityTool();
+          result = tool.execute(authorizer, securityContext, params);
           break;
         case "get_entity_lineage":
-          result = new GetLineageTool().execute(authorizer, securityContext, params);
+          tool = new GetLineageTool();
+          result = tool.execute(authorizer, securityContext, params);
+          break;
+        case "create_lineage":
+          result = new LineageTool().execute(authorizer, securityContext, params);
+          break;
+        case "get_test_definitions":
+          result = new TestDefinitionsTool().execute(authorizer, securityContext, params);
+          break;
+        case "create_test_case":
+          result = new CreateTestCaseTool().execute(authorizer, limits, securityContext, params);
+          break;
+        case "root_cause_analysis":
+          result = new RootCauseAnalysisTool().execute(authorizer, securityContext, params);
+          break;
+        case "create_metric":
+          result = new CreateMetricTool().execute(authorizer, limits, securityContext, params);
           break;
         default:
-          return new McpSchema.CallToolResult(
-              List.of(
-                  new McpSchema.TextContent(
-                      JsonUtils.pojoToJson(Map.of("error", "Unknown function: " + toolName)))),
-              true);
+          return McpSchema.CallToolResult.builder()
+              .content(
+                  List.of(
+                      new McpSchema.TextContent(
+                          JsonUtils.pojoToJson(Map.of("error", "Unknown function: " + toolName)))))
+              .isError(true)
+              .build();
       }
 
-      return new McpSchema.CallToolResult(
-          List.of(new McpSchema.TextContent(JsonUtils.pojoToJson(result))), false);
+      return McpSchema.CallToolResult.builder()
+          .content(List.of(new McpSchema.TextContent(JsonUtils.pojoToJson(result))))
+          .isError(false)
+          .build();
     } catch (AuthorizationException ex) {
-      LOG.error("Authorization error: {}", ex.getMessage());
-      return new McpSchema.CallToolResult(
-          List.of(
-              new McpSchema.TextContent(
-                  JsonUtils.pojoToJson(
-                      Map.of(
-                          "error",
-                          String.format("Authorization error: %s", ex.getMessage()),
-                          "statusCode",
-                          403)))),
-          true);
+      LOG.warn("Authorization error: {}", ex.getMessage());
+      return McpSchema.CallToolResult.builder()
+          .content(
+              List.of(
+                  new McpSchema.TextContent(
+                      JsonUtils.pojoToJson(
+                          Map.of(
+                              "error",
+                              String.format("Authorization error: %s", ex.getMessage()),
+                              "statusCode",
+                              403)))))
+          .isError(true)
+          .build();
     } catch (Exception ex) {
-      LOG.error("Error executing tool: {}", ex.getMessage());
-      return new McpSchema.CallToolResult(
-          List.of(
-              new McpSchema.TextContent(
-                  JsonUtils.pojoToJson(
-                      Map.of(
-                          "error",
-                          String.format("Error executing tool: %s", ex.getMessage()),
-                          "statusCode",
-                          500)))),
-          true);
+      LOG.error("Error executing tool '{}': {}", toolName, ex.getMessage(), ex);
+      return McpSchema.CallToolResult.builder()
+          .content(
+              List.of(
+                  new McpSchema.TextContent(
+                      JsonUtils.pojoToJson(
+                          Map.of(
+                              "error",
+                              String.format("Error executing tool: %s", ex.getMessage()),
+                              "statusCode",
+                              500)))))
+          .isError(true)
+          .build();
     }
   }
 }

@@ -38,6 +38,9 @@ from metadata.generated.schema.entity.services.dashboardService import (
 from metadata.generated.schema.metadataIngestion.dashboardServiceMetadataPipeline import (
     DashboardServiceMetadataPipeline,
 )
+from metadata.generated.schema.metadataIngestion.parserconfig.queryParserConfig import (
+    QueryParserType,
+)
 from metadata.generated.schema.metadataIngestion.workflow import (
     Source as WorkflowSource,
 )
@@ -350,6 +353,20 @@ class DashboardServiceSource(TopologyRunnerMixin, Source, ABC):
             else []
         )
 
+    def get_query_parser_type(self) -> QueryParserType:
+        """
+        Get the query parser type from source config.
+
+        Returns QueryParserType.Auto if queryParserConfig is not set.
+        """
+        if (
+            hasattr(self.source_config, "queryParserConfig")
+            and self.source_config.queryParserConfig
+            and self.source_config.queryParserConfig.type
+        ):
+            return self.source_config.queryParserConfig.type
+        return QueryParserType.Auto
+
     def parse_db_service_prefix(
         self, db_service_prefix: Optional[str]
     ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
@@ -420,6 +437,8 @@ class DashboardServiceSource(TopologyRunnerMixin, Source, ABC):
         """
         Method to pick up dashboard usage data
         """
+        if not self.source_config.includeUsage:
+            return
 
     def close(self):
         self.metadata.close()
@@ -505,7 +524,7 @@ class DashboardServiceSource(TopologyRunnerMixin, Source, ABC):
 
     @staticmethod
     def _get_add_lineage_request(
-        to_entity: Union[Dashboard, DashboardDataModel],
+        to_entity: Union[Dashboard, DashboardDataModel, Chart],
         from_entity: Union[Table, DashboardDataModel, Dashboard],
         column_lineage: List[ColumnLineage] = None,
         sql: Optional[str] = None,

@@ -33,6 +33,7 @@ import org.openmetadata.service.exception.EntityNotFoundException;
 import org.openmetadata.service.resources.docstore.DocStoreResource;
 import org.openmetadata.service.resources.settings.SettingsCache;
 import org.openmetadata.service.util.EntityUtil.Fields;
+import org.openmetadata.service.util.EntityUtil.RelationIncludes;
 import org.openmetadata.service.util.email.DefaultTemplateProvider;
 import org.openmetadata.service.util.email.TemplateProvider;
 
@@ -104,7 +105,7 @@ public class DocumentRepository extends EntityRepository<Document> {
   }
 
   @Override
-  public void setFields(Document document, Fields fields) {
+  public void setFields(Document document, Fields fields, RelationIncludes relationIncludes) {
     /* Nothing to do */
   }
 
@@ -147,8 +148,12 @@ public class DocumentRepository extends EntityRepository<Document> {
     @Transaction
     @Override
     public void entitySpecificUpdate(boolean consolidatingChanges) {
-      updateEmailTemplatePlaceholders(original, updated);
-      recordChange("data", original.getData(), updated.getData(), true);
+      compareAndUpdate(
+          "data",
+          () -> {
+            updateEmailTemplatePlaceholders(original, updated);
+            recordChange("data", original.getData(), updated.getData(), true);
+          });
     }
   }
 

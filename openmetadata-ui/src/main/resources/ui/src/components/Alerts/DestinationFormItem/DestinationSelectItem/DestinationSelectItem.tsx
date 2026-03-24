@@ -42,11 +42,11 @@ import {
 import { useFqn } from '../../../../hooks/useFqn';
 import { ModifiedDestination } from '../../../../pages/AddObservabilityPage/AddObservabilityPage.interface';
 import {
-  getConfigHeaderArrayFromObject,
   getDestinationConfigField,
   getDestinationStatusAlertData,
   getFilteredDestinationOptions,
   getSubscriptionTypeOptions,
+  normalizeDestinationConfig,
 } from '../../../../utils/Alerts/AlertsUtil';
 import { Transi18next } from '../../../../utils/CommonUtils';
 import { checkIfDestinationIsInternal } from '../../../../utils/ObservabilityUtils';
@@ -83,15 +83,7 @@ function DestinationSelectItem({
         {
           type: destination.type,
           category: destination.category,
-          config: omitBy(
-            {
-              ...destination.config,
-              headers: getConfigHeaderArrayFromObject(
-                destination?.config?.headers
-              ),
-            },
-            isUndefined
-          ),
+          config: normalizeDestinationConfig(destination.config),
         }
       )
     );
@@ -290,61 +282,63 @@ function DestinationSelectItem({
                 selectedDestinations[id]?.destinationType,
                 id
               )}
-            {destinationType && checkIfDestinationIsInternal(destinationType) && (
-              <>
-                <Col span={24}>
-                  <Form.Item
-                    required
-                    name={[id, 'type']}
-                    rules={[
-                      {
-                        required: true,
-                        message: t('message.field-text-is-required', {
-                          fieldText: t('label.field'),
-                        }),
-                      },
-                    ]}>
-                    <Select
-                      className="w-full"
-                      data-testid={`destination-type-select-${id}`}
-                      options={getSubscriptionTypeOptions(destinationType)}
-                      placeholder={t('label.select-field', {
-                        field: t('label.destination'),
-                      })}
-                      popupClassName="select-options-container"
-                    />
-                  </Form.Item>
-                </Col>
-                {destinationType && subscriptionType && (
+            {destinationType &&
+              checkIfDestinationIsInternal(destinationType) && (
+                <>
                   <Col span={24}>
-                    <Alert
-                      closable
-                      showIcon
-                      className="destination-warning-status"
-                      icon={<InfoCircleOutlined height={14} />}
-                      message={
-                        <Typography.Text className="text-sm">
-                          <Transi18next
-                            i18nKey={
-                              destinationType === SubscriptionCategory.Owners &&
-                              subscriptionType !== SubscriptionType.Email
-                                ? 'message.destination-owner-selection-warning'
-                                : 'message.destination-selection-warning'
-                            }
-                            renderElement={<b />}
-                            values={{
-                              subscriptionCategory: destinationType,
-                              subscriptionType,
-                            }}
-                          />
-                        </Typography.Text>
-                      }
-                      type="warning"
-                    />
+                    <Form.Item
+                      required
+                      name={[id, 'type']}
+                      rules={[
+                        {
+                          required: true,
+                          message: t('message.field-text-is-required', {
+                            fieldText: t('label.field'),
+                          }),
+                        },
+                      ]}>
+                      <Select
+                        className="w-full"
+                        data-testid={`destination-type-select-${id}`}
+                        options={getSubscriptionTypeOptions(destinationType)}
+                        placeholder={t('label.select-field', {
+                          field: t('label.destination'),
+                        })}
+                        popupClassName="select-options-container"
+                      />
+                    </Form.Item>
                   </Col>
-                )}
-              </>
-            )}
+                  {destinationType && subscriptionType && (
+                    <Col span={24}>
+                      <Alert
+                        closable
+                        showIcon
+                        className="destination-warning-status"
+                        icon={<InfoCircleOutlined height={14} />}
+                        message={
+                          <Typography.Text className="text-sm">
+                            <Transi18next
+                              i18nKey={
+                                destinationType ===
+                                  SubscriptionCategory.Owners &&
+                                subscriptionType !== SubscriptionType.Email
+                                  ? 'message.destination-owner-selection-warning'
+                                  : 'message.destination-selection-warning'
+                              }
+                              renderElement={<b />}
+                              values={{
+                                subscriptionCategory: destinationType,
+                                subscriptionType,
+                              }}
+                            />
+                          </Typography.Text>
+                        }
+                        type="warning"
+                      />
+                    </Col>
+                  )}
+                </>
+              )}
             {selectedDestinations && !isEmpty(selectedDestinations[id]) && (
               <Col span={24}>
                 <Form.Item
@@ -376,13 +370,16 @@ function DestinationSelectItem({
                       }),
                     },
                     {
-                      message: t('message.value-must-be-greater-than', {
-                        field: t('label.downstream-depth'),
-                        minimum: 0,
-                      }),
                       validator: (_, value) => {
                         if (!isEmpty(value) && value <= 0) {
-                          return Promise.reject();
+                          return Promise.reject(
+                            new Error(
+                              t('message.value-must-be-greater-than', {
+                                field: t('label.downstream-depth'),
+                                minimum: 0,
+                              })
+                            )
+                          );
                         }
 
                         return Promise.resolve();
@@ -425,7 +422,11 @@ function DestinationSelectItem({
                           {`${t('label.status')}:`}
                         </Typography.Text>
                         <Typography.Text className="font-medium text-sm m-l-xss">
-                          {`${destinationStatusDetails?.statusCode} ${statusLabel} ${destinationStatusDetails?.reason}`}
+                          {`${
+                            destinationStatusDetails?.statusCode
+                          } ${statusLabel} ${
+                            destinationStatusDetails?.reason ?? ''
+                          }`}
                         </Typography.Text>
                       </>
                     }

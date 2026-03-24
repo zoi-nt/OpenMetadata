@@ -1,4 +1,3 @@
-/* eslint-disable i18next/no-literal-string */
 /*
  *  Copyright 2022 Collate.
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,7 +10,6 @@
  *  See the License for the specific language governing permissions and
  *  limitations under the License.
  */
-
 import { Button, Col, Divider, Drawer, Row, Tooltip, Typography } from 'antd';
 import classNames from 'classnames';
 import { isEmpty, toString } from 'lodash';
@@ -62,6 +60,7 @@ export const VersionButton = forwardRef<
         'timeline-content p-b-md cursor-pointer',
         className
       )}
+      data-testid={`version-entry-${versionText}`}
       ref={ref}
       onClick={() => onVersionSelect(toString(versionNumber))}>
       <div className="timeline-wrapper">
@@ -96,7 +95,8 @@ export const VersionButton = forwardRef<
         <div
           className={classNames('text-xs font-normal break-all', {
             'diff-description': selected,
-          })}>
+          })}
+          data-testid="version-change-description">
           {getSummary({
             changeDescription: changeDescription,
             isGlossaryTerm: !isEmpty(glossary),

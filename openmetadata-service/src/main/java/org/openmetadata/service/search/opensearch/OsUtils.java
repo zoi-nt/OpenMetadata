@@ -13,6 +13,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.nimbusds.jose.util.Pair;
+import io.micrometer.core.instrument.Timer;
 import java.io.IOException;
 import java.util.Base64;
 import java.util.HashMap;
@@ -27,7 +28,10 @@ import org.openmetadata.schema.api.lineage.LineageDirection;
 import org.openmetadata.schema.utils.JsonUtils;
 import org.openmetadata.sdk.exception.SearchException;
 import org.openmetadata.service.Entity;
+import org.openmetadata.service.monitoring.RequestLatencyContext;
+import org.openmetadata.service.search.SearchRepository;
 import os.org.opensearch.client.json.JsonData;
+import os.org.opensearch.client.json.jackson.JacksonJsonpMapper;
 import os.org.opensearch.client.opensearch.OpenSearchClient;
 import os.org.opensearch.client.opensearch._types.FieldValue;
 import os.org.opensearch.client.opensearch._types.SortOrder;
@@ -60,7 +64,7 @@ public class OsUtils {
     } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
       throw new IllegalArgumentException("Invalid JSON input", e);
     }
-    return JsonData.of(docMap);
+    return JsonData.of(docMap, jsonpMapper);
   }
 
   public static String parseJsonQuery(String jsonQuery) throws JsonProcessingException {
@@ -77,9 +81,11 @@ public class OsUtils {
   }
 
   private static final ObjectMapper mapper;
+  private static final JacksonJsonpMapper jsonpMapper;
 
   static {
     mapper = new ObjectMapper();
+    jsonpMapper = new JacksonJsonpMapper(mapper);
   }
 
   public static String getEntityRelationshipAggregationField(
@@ -135,8 +141,15 @@ public class OsUtils {
       }
     }
 
-    return client.search(
-        searchRequestBuilder.build(), os.org.opensearch.client.json.JsonData.class);
+    Timer.Sample searchTimerSample = RequestLatencyContext.startSearchOperation();
+    try {
+      return client.search(
+          searchRequestBuilder.build(), os.org.opensearch.client.json.JsonData.class);
+    } finally {
+      if (searchTimerSample != null) {
+        RequestLatencyContext.endSearchOperation(searchTimerSample);
+      }
+    }
   }
 
   public static Map<String, Object> searchEREntityByKey(
@@ -190,7 +203,15 @@ public class OsUtils {
             null,
             null,
             fieldsToRemove);
-    SearchResponse<JsonData> searchResponse = client.search(searchRequest, JsonData.class);
+    Timer.Sample searchTimerSample = RequestLatencyContext.startSearchOperation();
+    SearchResponse<JsonData> searchResponse;
+    try {
+      searchResponse = client.search(searchRequest, JsonData.class);
+    } finally {
+      if (searchTimerSample != null) {
+        RequestLatencyContext.endSearchOperation(searchTimerSample);
+      }
+    }
 
     for (Hit<JsonData> hit : searchResponse.hits().hits()) {
       if (hit.source() != null) {
@@ -306,7 +327,15 @@ public class OsUtils {
             null,
             null,
             fieldsToRemove);
-    SearchResponse<JsonData> searchResponse = client.search(searchRequest, JsonData.class);
+    Timer.Sample searchTimerSample = RequestLatencyContext.startSearchOperation();
+    SearchResponse<JsonData> searchResponse;
+    try {
+      searchResponse = client.search(searchRequest, JsonData.class);
+    } finally {
+      if (searchTimerSample != null) {
+        RequestLatencyContext.endSearchOperation(searchTimerSample);
+      }
+    }
 
     for (Hit<JsonData> hit : searchResponse.hits().hits()) {
       if (hit.source() != null) {
@@ -389,7 +418,14 @@ public class OsUtils {
     // Apply query filter
     buildSearchSourceFilter(queryFilter, searchRequestBuilder);
 
-    return client.search(searchRequestBuilder.build(), JsonData.class);
+    Timer.Sample searchTimerSample = RequestLatencyContext.startSearchOperation();
+    try {
+      return client.search(searchRequestBuilder.build(), JsonData.class);
+    } finally {
+      if (searchTimerSample != null) {
+        RequestLatencyContext.endSearchOperation(searchTimerSample);
+      }
+    }
   }
 
   private static Query buildBoolQueriesWithShould(Map<String, Set<String>> keysAndValues) {
@@ -483,5 +519,160 @@ public class OsUtils {
     }
 
     return rootNode.toString();
+  }
+
+  /**
+   * Transforms Elasticsearch field types to OpenSearch equivalents in mappings.
+   * Currently handles: "flattened" -> "flat_object"
+   *
+   * @param mappingsNode The mappings JSON node
+   * @return Transformed mappings node with OpenSearch-compatible types
+   */
+  public static JsonNode transformFieldTypesForOpenSearch(JsonNode mappingsNode) {
+    try {
+      ObjectNode transformedNode = (ObjectNode) JsonUtils.readTree(mappingsNode.toString());
+      JsonNode propertiesNode = transformedNode.path("properties");
+      if (!propertiesNode.isMissingNode() && propertiesNode.isObject()) {
+        transformFieldTypesRecursive((ObjectNode) propertiesNode);
+      }
+      return transformedNode;
+    } catch (Exception e) {
+      LOG.warn(
+          "Failed to transform field types for OpenSearch, using original mappings: {}",
+          e.getMessage());
+      return mappingsNode;
+    }
+  }
+
+  private static void transformFieldTypesRecursive(ObjectNode propertiesNode) {
+    propertiesNode
+        .fields()
+        .forEachRemaining(
+            entry -> {
+              JsonNode fieldDef = entry.getValue();
+              if (fieldDef.isObject()) {
+                ObjectNode fieldObj = (ObjectNode) fieldDef;
+
+                // Transform "flattened" to "flat_object" for OpenSearch
+                JsonNode typeNode = fieldObj.get("type");
+                if (typeNode != null && "flattened".equals(typeNode.asText())) {
+                  fieldObj.put("type", "flat_object");
+                  LOG.debug(
+                      "Transformed field '{}' from 'flattened' to 'flat_object'", entry.getKey());
+                }
+
+                // Recurse into nested properties
+                JsonNode nestedProps = fieldObj.get("properties");
+                if (nestedProps != null && nestedProps.isObject()) {
+                  transformFieldTypesRecursive((ObjectNode) nestedProps);
+                }
+              }
+            });
+  }
+
+  /**
+   * Enriches index mapping content with OpenSearch-compatible transformations.
+   * Applies both stemmer and field type transformations.
+   *
+   * @param indexMappingContent The original index mapping JSON content
+   * @return Transformed index mapping content for OpenSearch
+   */
+  public static String enrichIndexMappingForOpenSearch(String indexMappingContent) {
+    if (nullOrEmpty(indexMappingContent)) {
+      throw new IllegalArgumentException("Empty Index Mapping Content.");
+    }
+    JsonNode rootNode = JsonUtils.readTree(indexMappingContent);
+
+    // Transform settings (stemmer configuration)
+    JsonNode settingsNode = rootNode.get("settings");
+    if (settingsNode != null && !settingsNode.isNull()) {
+      JsonNode transformedSettings = transformStemmerForOpenSearch(settingsNode);
+      ((ObjectNode) rootNode).set("settings", transformedSettings);
+    }
+
+    // Transform mappings (field types like flattened -> flat_object)
+    JsonNode mappingsNode = rootNode.get("mappings");
+    if (mappingsNode != null && !mappingsNode.isNull()) {
+      JsonNode transformedMappings = transformFieldTypesForOpenSearch(mappingsNode);
+      ((ObjectNode) rootNode).set("mappings", transformedMappings);
+    }
+
+    // Add knn_vector settings for embedding-enabled indexes
+    addKnnVectorSettings(rootNode);
+
+    return rootNode.toString();
+  }
+
+  /**
+   * Adds OpenSearch-specific knn_vector field and index settings for indexes that support
+   * embeddings. Detects embedding support by the presence of a "fingerprint" field in mappings.
+   * This keeps the static mapping files search-engine-agnostic while enabling vector search on
+   * OpenSearch.
+   *
+   * <p>The embedding dimension is resolved from the active embedding client (source of truth),
+   * not from index metadata. This ensures correct dimensions even on first enable (when existing
+   * indexes have no {@code _meta}) and on model changes. If {@code _meta.embedding_dimension} is
+   * present, it is validated against the client dimension to detect stale indexes that need a
+   * reindex.
+   */
+  static void addKnnVectorSettings(JsonNode rootNode) {
+    JsonNode properties = rootNode.path("mappings").path("properties");
+    if (properties.isMissingNode() || !properties.has("fingerprint")) {
+      return;
+    }
+
+    // The embedding client is the single source of truth for the vector dimension.
+    // We do NOT fall back to _meta or a hardcoded default, because:
+    // 1. On first enable, existing indexes won't have _meta yet
+    // 2. On model change, _meta would carry the old (wrong) dimension
+    // If the client is not available (embeddings disabled), we skip knn setup entirely.
+    SearchRepository searchRepository = Entity.getSearchRepository();
+    if (searchRepository == null
+        || !searchRepository.isVectorEmbeddingEnabled()
+        || searchRepository.getEmbeddingClient() == null) {
+      return;
+    }
+
+    int dimension = searchRepository.getEmbeddingClient().getDimension();
+
+    // If _meta.embedding_dimension exists, validate it matches the client.
+    // A mismatch means the index was built with a different model/config and needs a reindex.
+    JsonNode meta = rootNode.path("mappings").path("_meta");
+    if (!meta.isMissingNode() && meta.has("embedding_dimension")) {
+      int metaDimension = meta.get("embedding_dimension").asInt();
+      if (metaDimension != dimension) {
+        LOG.error(
+            "Embedding dimension mismatch: _meta says {} but embedding client reports {}. "
+                + "Using embedding client dimension. A reindex may be required.",
+            metaDimension,
+            dimension);
+      }
+    }
+
+    JsonNode indexSettingsNode = rootNode.path("settings").path("index");
+    if (!indexSettingsNode.isMissingNode() && indexSettingsNode.isObject()) {
+      ObjectNode indexSettings = (ObjectNode) indexSettingsNode;
+      indexSettings.put("knn", true);
+      indexSettings.put("knn.algo_param.ef_search", 1000);
+      indexSettings.put("knn.advanced.filtered_exact_search_threshold", 0);
+    }
+
+    ObjectMapper mapper = new ObjectMapper();
+    ObjectNode embeddingNode = mapper.createObjectNode();
+    embeddingNode.put("type", "knn_vector");
+    embeddingNode.put("dimension", dimension);
+
+    ObjectNode methodNode = mapper.createObjectNode();
+    methodNode.put("name", "hnsw");
+    methodNode.put("engine", "lucene");
+    methodNode.put("space_type", "cosinesimil");
+
+    ObjectNode paramsNode = mapper.createObjectNode();
+    paramsNode.put("m", 48);
+    paramsNode.put("ef_construction", 256);
+    methodNode.set("parameters", paramsNode);
+
+    embeddingNode.set("method", methodNode);
+    ((ObjectNode) properties).set("embedding", embeddingNode);
   }
 }

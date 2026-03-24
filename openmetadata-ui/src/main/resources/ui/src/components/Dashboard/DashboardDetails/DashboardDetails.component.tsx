@@ -38,6 +38,7 @@ import {
   getTabLabelMapFromTabs,
 } from '../../../utils/CustomizePage/CustomizePageUtils';
 import dashboardDetailsClassBase from '../../../utils/DashboardDetailsClassBase';
+import { getEntityName } from '../../../utils/EntityUtils';
 import {
   DEFAULT_ENTITY_PERMISSION,
   getPrioritizedEditPermission,
@@ -73,10 +74,14 @@ const DashboardDetails = ({
   const { t } = useTranslation();
   const { currentUser } = useApplicationStore();
   const navigate = useNavigate();
-  const { tab: activeTab = EntityTabs.DETAILS } =
-    useRequiredParams<{ tab: EntityTabs }>();
+  const { tab: activeTab = EntityTabs.DETAILS } = useRequiredParams<{
+    tab: EntityTabs;
+  }>();
   const { customizedPage, isLoading } = useCustomPages(PageType.Dashboard);
-  const { fqn: decodedDashboardFQN } = useFqn();
+
+  const { entityFqn: decodedDashboardFQN } = useFqn({
+    type: EntityType.DASHBOARD,
+  });
   const [feedCount, setFeedCount] = useState<FeedCounts>(
     FEED_COUNT_INITIAL_DATA
   );
@@ -313,9 +318,7 @@ const DashboardDetails = ({
 
   return (
     <PageLayoutV1
-      pageTitle={t('label.entity-detail-plural', {
-        entity: t('label.dashboard'),
-      })}
+      pageTitle={getEntityName(dashboardDetails)}
       title="Table details">
       <Row gutter={[0, 12]}>
         <Col span={24}>

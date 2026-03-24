@@ -36,6 +36,7 @@ import org.openmetadata.service.Entity;
 import org.openmetadata.service.resources.charts.ChartResource;
 import org.openmetadata.service.util.EntityUtil;
 import org.openmetadata.service.util.EntityUtil.Fields;
+import org.openmetadata.service.util.EntityUtil.RelationIncludes;
 import org.openmetadata.service.util.FullyQualifiedName;
 
 @Slf4j
@@ -56,7 +57,9 @@ public class ChartRepository extends EntityRepository<Chart> {
 
     // Register bulk field fetchers for efficient database operations
     fieldFetchers.put("dashboards", this::fetchAndSetDashboards);
-    fieldFetchers.put("service", this::fetchAndSetServices);
+    // NOTE: "service" field is NOT registered here because:
+    // - For bulk operations: fetchAndSetDefaultService() in setFieldsInBulk handles it correctly
+    // - For single entity: setFields() already sets service via getContainer()
   }
 
   @Override
@@ -67,20 +70,34 @@ public class ChartRepository extends EntityRepository<Chart> {
 
   @Override
   public void prepare(Chart chart, boolean update) {
-    DashboardService dashboardService = Entity.getEntity(chart.getService(), "", Include.ALL);
+    var dashboardService =
+        (DashboardService) getCachedParentOrLoad(chart.getService(), "", Include.ALL);
     chart.setService(dashboardService.getEntityReference());
     chart.setServiceType(dashboardService.getServiceType());
     chart.setDashboards(EntityUtil.getEntityReferences(chart.getDashboards(), Include.NON_DELETED));
   }
 
   @Override
+  protected List<String> getFieldsStrippedFromStorageJson() {
+    return List.of("service", "dashboards");
+  }
+
+  @Override
   public void storeEntity(Chart chart, boolean update) {
-    // Relationships and fields such as tags are not stored as part of json
-    EntityReference service = chart.getService();
-    List<EntityReference> dashboards = chart.getDashboards();
-    chart.withService(null).withDashboards(null);
     store(chart, update);
-    chart.withService(service).withDashboards(dashboards);
+  }
+
+  @Override
+  public void storeEntities(List<Chart> charts) {
+    storeMany(charts);
+  }
+
+  @Override
+  protected void clearEntitySpecificRelationshipsForMany(List<Chart> entities) {
+    if (entities.isEmpty()) return;
+    List<UUID> ids = entities.stream().map(Chart::getId).toList();
+    deleteToMany(ids, entityType, Relationship.CONTAINS, null);
+    deleteToMany(ids, Entity.CHART, Relationship.HAS, Entity.DASHBOARD);
   }
 
   @Override
@@ -95,10 +112,45 @@ public class ChartRepository extends EntityRepository<Chart> {
   }
 
   @Override
-  public void setFields(Chart chart, Fields fields) {
+  protected void storeEntitySpecificRelationshipsForMany(List<Chart> entities) {
+    List<CollectionDAO.EntityRelationshipObject> relationships = new ArrayList<>();
+    for (Chart chart : entities) {
+      EntityReference service = chart.getService();
+      if (service != null && service.getId() != null) {
+        relationships.add(
+            newRelationship(
+                service.getId(),
+                chart.getId(),
+                service.getType(),
+                entityType,
+                Relationship.CONTAINS));
+      }
+      for (EntityReference dashboard : listOrEmpty(chart.getDashboards())) {
+        if (dashboard.getId() == null) {
+          continue;
+        }
+        relationships.add(
+            newRelationship(
+                dashboard.getId(),
+                chart.getId(),
+                Entity.DASHBOARD,
+                Entity.CHART,
+                Relationship.HAS));
+      }
+    }
+    bulkInsertRelationships(relationships);
+  }
+
+  @Override
+  public void setFields(Chart chart, Fields fields, RelationIncludes relationIncludes) {
     chart.withService(getContainer(chart.getId()));
+    // Use Include.ALL for dashboards to match legacy behavior - dashboard-chart relationship
+    // should show all associated dashboards regardless of delete status to maintain referential
+    // integrity
     chart.setDashboards(
-        fields.contains("dashboards") ? getRelatedEntities(chart, Entity.DASHBOARD) : null);
+        fields.contains("dashboards")
+            ? getRelatedEntities(chart, Entity.DASHBOARD, Include.ALL)
+            : null);
   }
 
   @Override
@@ -117,17 +169,6 @@ public class ChartRepository extends EntityRepository<Chart> {
       return;
     }
     setFieldFromMap(true, charts, batchFetchDashboards(charts), Chart::setDashboards);
-  }
-
-  private void fetchAndSetServices(List<Chart> charts, Fields fields) {
-    if (!fields.contains("service") || charts == null || charts.isEmpty()) {
-      return;
-    }
-    // For charts, all should have the same service (dashboard service)
-    EntityReference service = getContainer(charts.get(0).getId());
-    for (Chart chart : charts) {
-      chart.setService(service);
-    }
   }
 
   @Override
@@ -149,6 +190,11 @@ public class ChartRepository extends EntityRepository<Chart> {
   }
 
   @Override
+  protected EntityReference getParentReference(Chart entity) {
+    return entity.getService();
+  }
+
+  @Override
   public EntityInterface getParentEntity(Chart entity, String fields) {
     if (entity.getService() == null) {
       return null;
@@ -156,10 +202,11 @@ public class ChartRepository extends EntityRepository<Chart> {
     return Entity.getEntity(entity.getService(), fields, Include.ALL);
   }
 
-  private List<EntityReference> getRelatedEntities(Chart chart, String entityType) {
+  private List<EntityReference> getRelatedEntities(
+      Chart chart, String entityType, Include include) {
     return chart == null
         ? Collections.emptyList()
-        : findFrom(chart.getId(), Entity.CHART, Relationship.HAS, entityType);
+        : findFrom(chart.getId(), Entity.CHART, Relationship.HAS, entityType, include);
   }
 
   public class ChartUpdater extends ColumnEntityUpdater {
@@ -170,14 +217,36 @@ public class ChartRepository extends EntityRepository<Chart> {
     @Transaction
     @Override
     public void entitySpecificUpdate(boolean consolidatingChanges) {
-      recordChange("chartType", original.getChartType(), updated.getChartType());
-      recordChange("sourceUrl", original.getSourceUrl(), updated.getSourceUrl());
-      recordChange("sourceHash", original.getSourceHash(), updated.getSourceHash());
-      update(
-          Entity.DASHBOARD,
+      compareAndUpdate(
+          "chartType",
+          () -> {
+            recordChange("chartType", original.getChartType(), updated.getChartType());
+          });
+      compareAndUpdate(
+          "sourceUrl",
+          () -> {
+            recordChange("sourceUrl", original.getSourceUrl(), updated.getSourceUrl());
+          });
+      compareAndUpdate(
+          "sourceHash",
+          () -> {
+            recordChange(
+                "sourceHash",
+                original.getSourceHash(),
+                updated.getSourceHash(),
+                false,
+                EntityUtil.objectMatch,
+                false);
+          });
+      compareAndUpdate(
           "dashboards",
-          listOrEmpty(updated.getDashboards()),
-          listOrEmpty(original.getDashboards()));
+          () -> {
+            update(
+                Entity.DASHBOARD,
+                "dashboards",
+                listOrEmpty(updated.getDashboards()),
+                listOrEmpty(original.getDashboards()));
+          });
     }
 
     private void update(

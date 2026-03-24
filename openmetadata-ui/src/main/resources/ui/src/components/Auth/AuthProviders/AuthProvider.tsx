@@ -13,7 +13,6 @@
 
 import { removeSession } from '@analytics/session-utils';
 import { Auth0Provider } from '@auth0/auth0-react';
-
 import {
   Configuration,
   IPublicClientApplication,
@@ -26,9 +25,8 @@ import {
   InternalAxiosRequestConfig,
 } from 'axios';
 import { CookieStorage } from 'cookie-storage';
-import { isEmpty, isNil, isNumber } from 'lodash';
+import { isNil, isNumber } from 'lodash';
 import { WebStorageStateStore } from 'oidc-client';
-import Qs from 'qs';
 import {
   ComponentType,
   createContext,
@@ -43,15 +41,9 @@ import {
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { UN_AUTHORIZED_EXCLUDED_PATHS } from '../../../constants/Auth.constants';
-import {
-  DEFAULT_DOMAIN_VALUE,
-  ES_MAX_PAGE_SIZE,
-  REDIRECT_PATHNAME,
-  ROUTES,
-} from '../../../constants/constants';
+import { REDIRECT_PATHNAME, ROUTES } from '../../../constants/constants';
 import { ClientErrors } from '../../../enums/Axios.enum';
 import { TabSpecificField } from '../../../enums/entity.enum';
-import { SearchIndex } from '../../../enums/search.enum';
 import {
   AuthenticationConfiguration,
   ClientType,
@@ -60,9 +52,7 @@ import { User } from '../../../generated/entity/teams/user';
 import { AuthProvider as AuthProviderEnum } from '../../../generated/settings/settings';
 import { useApplicationStore } from '../../../hooks/useApplicationStore';
 import useCustomLocation from '../../../hooks/useCustomLocation/useCustomLocation';
-import { useDomainStore } from '../../../hooks/useDomainStore';
 import axiosClient from '../../../rest';
-import { getDomainList } from '../../../rest/domainAPI';
 import {
   fetchAuthenticationConfig,
   fetchAuthorizerConfig,
@@ -78,13 +68,11 @@ import {
   prepareUserProfileFromClaims,
   validateAuthFields,
 } from '../../../utils/AuthProvider.util';
-import { getPathNameFromWindowLocation } from '../../../utils/RouterUtils';
-import { escapeESReservedCharacters } from '../../../utils/StringsUtils';
+import { withDomainFilter } from '../../../utils/DomainUtils';
 import {
+  clearOidcToken,
   getOidcToken,
   getRefreshToken,
-  setOidcToken,
-  setRefreshToken,
 } from '../../../utils/SwTokenStorageUtils';
 import { showErrorToast, showInfoToast } from '../../../utils/ToastUtils';
 import { checkIfUpdateRequired } from '../../../utils/UserDataUtils';
@@ -96,7 +84,6 @@ import { GenericAuthenticator } from '../AppAuthenticators/GenericAuthenticator'
 import MsalAuthenticator from '../AppAuthenticators/MsalAuthenticator';
 import OidcAuthenticator from '../AppAuthenticators/OidcAuthenticator';
 import OktaAuthenticator from '../AppAuthenticators/OktaAuthenticator';
-import SamlAuthenticator from '../AppAuthenticators/SamlAuthenticator';
 import { AuthenticatorRef, OidcUser } from './AuthProvider.interface';
 import BasicAuthProvider from './BasicAuthProvider';
 import OktaAuthProvider from './OktaAuthProvider';
@@ -122,7 +109,6 @@ const isEmailVerifyField = 'isEmailVerified';
 let requestInterceptor: number | null = null;
 let responseInterceptor: number | null = null;
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let pendingRequests: any[] = [];
 
 type AuthContextType = {
@@ -158,7 +144,6 @@ export const AuthProvider = ({
     isAuthenticating,
     initializeAuthState,
   } = useApplicationStore();
-  const { updateDomains, updateDomainLoading } = useDomainStore();
   const tokenService = useRef<TokenService>(TokenService.getInstance());
 
   const location = useCustomLocation();
@@ -204,8 +189,7 @@ export const AuthProvider = ({
     removeSession();
 
     // Clear tokens properly during logout
-    await setOidcToken('');
-    await setRefreshToken('');
+    await clearOidcToken();
 
     setApplicationLoading(false);
 
@@ -215,21 +199,6 @@ export const AuthProvider = ({
     // Upon logout, redirect to the login page
     navigate(ROUTES.SIGNIN);
   }, [timeoutId]);
-
-  const fetchDomainList = useCallback(async () => {
-    try {
-      updateDomainLoading(true);
-      const { data } = await getDomainList({
-        limit: ES_MAX_PAGE_SIZE,
-        fields: 'parent',
-      });
-      updateDomains(data);
-    } catch (error) {
-      // silent fail
-    } finally {
-      updateDomainLoading(false);
-    }
-  }, []);
 
   const handledVerifiedUser = () => {
     if (!applicationRoutesClass.isProtectedRoute(location.pathname)) {
@@ -265,8 +234,7 @@ export const AuthProvider = ({
 
   const resetUserDetails = (forceLogout = false) => {
     setCurrentUser({} as User);
-    setOidcToken('');
-    setRefreshToken('');
+    clearOidcToken();
     setIsAuthenticated(false);
     setApplicationLoading(false);
     clearTimeout(timeoutId);
@@ -286,8 +254,6 @@ export const AuthProvider = ({
       if (res) {
         setCurrentUser(res);
         setIsAuthenticated(true);
-        // Fetch domains at the start
-        await fetchDomainList();
       } else {
         resetUserDetails();
       }
@@ -390,9 +356,6 @@ export const AuthProvider = ({
           const userDetails = await checkIfUpdateRequired(res, newUser);
           setCurrentUser(userDetails);
 
-          // Fetch domains at the start
-          await fetchDomainList();
-
           handledVerifiedUser();
           // Start expiry timer on successful login
           startTokenExpiryTimer();
@@ -465,56 +428,6 @@ export const AuthProvider = ({
     }
   };
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const withDomainFilter = (config: InternalAxiosRequestConfig<any>) => {
-    const isGetRequest = config.method === 'get';
-    const activeDomain = useDomainStore.getState().activeDomain;
-    const hasActiveDomain = activeDomain !== DEFAULT_DOMAIN_VALUE;
-    const currentPath = getPathNameFromWindowLocation();
-    const shouldNotIntercept = [
-      '/domain',
-      '/auth/logout',
-      '/auth/refresh',
-    ].reduce((prev, curr) => {
-      return prev || currentPath.startsWith(curr);
-    }, false);
-
-    // Do not intercept requests from domains page or /auth endpoints
-    if (shouldNotIntercept) {
-      return config;
-    }
-
-    if (isGetRequest && hasActiveDomain) {
-      // Filter ES Query
-      if (config.url?.includes('/search/query')) {
-        if (config.params?.index === SearchIndex.TAG) {
-          return config;
-        }
-
-        // Parse and update the query parameter
-        const queryParams = Qs.parse(config.url.split('?')[1]);
-        // adding quotes for exact matching
-        const domainStatement = `(domains.fullyQualifiedName:"${escapeESReservedCharacters(
-          activeDomain
-        )}")`;
-        queryParams.q = queryParams.q ?? '';
-        queryParams.q += isEmpty(queryParams.q)
-          ? domainStatement
-          : ` AND ${domainStatement}`;
-
-        // Update the URL with the modified query parameter
-        config.url = `${config.url.split('?')[0]}?${Qs.stringify(queryParams)}`;
-      } else {
-        config.params = {
-          ...config.params,
-          domain: activeDomain,
-        };
-      }
-    }
-
-    return config;
-  };
-
   /**
    * Initialize Axios interceptors to intercept every request and response
    * to handle appropriately. This should be called only when security is enabled.
@@ -530,7 +443,6 @@ export const AuthProvider = ({
     }
 
     requestInterceptor = axiosClient.interceptors.request.use(async function (
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       config: InternalAxiosRequestConfig<any>
     ) {
       // Need to read token from local storage as it might have been updated with refresh
@@ -566,7 +478,7 @@ export const AuthProvider = ({
               (error.config.url === '/users/loggedInUser' &&
                 !error.response.data.message.includes('Expired token!'))
             ) {
-              return Promise.reject(error);
+              throw error;
             }
             handleStoreProtectedRedirectPath();
 
@@ -633,7 +545,7 @@ export const AuthProvider = ({
         // show an error toast if provider is null or not supported
         if (provider && Object.values(AuthProviderEnum).includes(provider)) {
           const configJson = getAuthConfig(authConfig);
-          validateAuthFields(configJson, t);
+          validateAuthFields(configJson);
           setJwtPrincipalClaims(authConfig.jwtPrincipalClaims);
           setJwtPrincipalClaimsMapping(authConfig.jwtPrincipalClaimsMapping);
           setAuthConfig(configJson);
@@ -647,11 +559,9 @@ export const AuthProvider = ({
           } else {
             // get the user details if token is present and route is not auth callback and saml callback
             if (
-              ![
-                ROUTES.AUTH_CALLBACK,
-                ROUTES.SAML_CALLBACK,
-                ROUTES.SILENT_CALLBACK,
-              ].includes(location.pathname)
+              ![ROUTES.AUTH_CALLBACK, ROUTES.SILENT_CALLBACK].includes(
+                location.pathname
+              )
             ) {
               getLoggedInUserDetails();
             }
@@ -689,7 +599,11 @@ export const AuthProvider = ({
         children
       );
 
-    if (clientType === ClientType.Confidential) {
+    // Handling for SAML moved to GenericAuthenticator
+    if (
+      clientType === ClientType.Confidential ||
+      authConfig?.provider === AuthProviderEnum.Saml
+    ) {
       return (
         <GenericAuthenticator ref={authenticatorRef}>
           {childElement}
@@ -712,20 +626,13 @@ export const AuthProvider = ({
           <Auth0Provider
             useRefreshTokens
             cacheLocation="memory"
-            clientId={authConfig.clientId.toString()}
-            domain={authConfig.authority.toString()}
-            redirectUri={authConfig.callbackUrl.toString()}>
+            clientId={authConfig.clientId?.toString() ?? ''}
+            domain={authConfig.authority?.toString() ?? ''}
+            redirectUri={authConfig.callbackUrl?.toString()}>
             <Auth0Authenticator ref={authenticatorRef}>
               {childElement}
             </Auth0Authenticator>
           </Auth0Provider>
-        );
-      }
-      case AuthProviderEnum.Saml: {
-        return (
-          <SamlAuthenticator ref={authenticatorRef}>
-            {childElement}
-          </SamlAuthenticator>
         );
       }
       case AuthProviderEnum.Okta: {

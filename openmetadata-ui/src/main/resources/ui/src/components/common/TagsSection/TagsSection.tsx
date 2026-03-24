@@ -16,7 +16,7 @@ import { useTranslation } from 'react-i18next';
 import { ReactComponent as ClassificationIcon } from '../../../assets/svg/classification.svg';
 import { ReactComponent as EditIcon } from '../../../assets/svg/edit-new.svg';
 import { DE_ACTIVE_COLOR } from '../../../constants/constants';
-import { TagLabel } from '../../../generated/type/tagLabel';
+import { TagLabel, TagSource } from '../../../generated/type/tagLabel';
 import { useEditableSection } from '../../../hooks/useEditableSection';
 import { updateEntityField } from '../../../utils/EntityUpdateUtils';
 import { getEntityName } from '../../../utils/EntityUtils';
@@ -56,7 +56,7 @@ const TagsSectionV1: React.FC<TagsSectionProps> = ({
     (tag.tagFQN || tag.name || tag.displayName || '').toString();
 
   const nonTierTags: TagLabel[] = (displayTags || []).filter(
-    (t) => !getTagFqn(t).startsWith('Tier.')
+    (t) => !getTagFqn(t).startsWith('Tier.') && t.source !== TagSource.Glossary
   );
   const tierTags: TagLabel[] = (displayTags || []).filter((t) =>
     getTagFqn(t).startsWith('Tier.')
@@ -71,7 +71,33 @@ const TagsSectionV1: React.FC<TagsSectionProps> = ({
     async (tagsToSave: TagLabel[]) => {
       setIsLoading(true);
 
-      const updatedTags: TagLabel[] = [...tierTags, ...tagsToSave];
+      const glossaryTags = displayTags.filter(
+        (tag) => tag.source === TagSource.Glossary
+      );
+      const updatedTags: TagLabel[] = [
+        ...tierTags,
+        ...glossaryTags,
+        ...tagsToSave,
+      ];
+
+      // When onTagsUpdate is provided, use it directly as the update mechanism
+      // This avoids updateEntityField's fallback behavior for non-standard entity types
+      if (onTagsUpdate) {
+        try {
+          const resultTags = await onTagsUpdate(updatedTags);
+          if (resultTags) {
+            setDisplayTags(resultTags);
+          }
+          completeEditing();
+        } catch {
+          // Revert editing state so the UI doesn't show the failed selection
+          setEditingTags(nonTierTags);
+          cancelEditing();
+          setIsLoading(false);
+        }
+
+        return;
+      }
 
       const result = await updateEntityField({
         entityId,
@@ -82,13 +108,13 @@ const TagsSectionV1: React.FC<TagsSectionProps> = ({
         entityLabel: t('label.tag-plural'),
         onSuccess: (tags) => {
           setDisplayTags(tags);
-          onTagsUpdate?.(tags);
-          completeEditing();
         },
         t,
       });
 
-      if (!result.success) {
+      if (result.success) {
+        completeEditing();
+      } else {
         setIsLoading(false);
       }
     },
@@ -124,7 +150,7 @@ const TagsSectionV1: React.FC<TagsSectionProps> = ({
       <TagSelectableList
         hasPermission={hasPermission}
         popoverProps={{
-          placement: 'topRight',
+          placement: 'top',
           open: popoverOpen,
           onOpenChange: handlePopoverOpenChange,
           overlayClassName: 'tag-select-popover',
@@ -136,7 +162,7 @@ const TagsSectionV1: React.FC<TagsSectionProps> = ({
         }}
         onUpdate={handleTagSelection}>
         <div className="d-none tag-selector-display">
-          {editingTags.length > 0 && (
+          {editingTags.length > 0 ? (
             <div className="selected-tags-list">
               {editingTags.map((tag) => (
                 <div
@@ -148,6 +174,12 @@ const TagsSectionV1: React.FC<TagsSectionProps> = ({
                 </div>
               ))}
             </div>
+          ) : (
+            <span className="no-data-placeholder">
+              {t('label.no-entity-assigned', {
+                entity: t('label.tag-plural'),
+              })}
+            </span>
           )}
         </div>
       </TagSelectableList>

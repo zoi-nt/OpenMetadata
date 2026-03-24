@@ -19,7 +19,8 @@ from typing import Dict, Iterable, List, Optional
 from metadata.generated.schema.entity.services.connections.dashboard.qlikCloudConnection import (
     QlikCloudConnection,
 )
-from metadata.ingestion.ometa.client import REST, ClientConfig
+from metadata.ingestion.connections.source_api_client import TrackedREST
+from metadata.ingestion.ometa.client import ClientConfig
 from metadata.ingestion.source.dashboard.qlikcloud.constants import (
     APP_LOADMODEL_REQ,
     CREATE_SHEET_SESSION,
@@ -31,6 +32,8 @@ from metadata.ingestion.source.dashboard.qlikcloud.constants import (
 from metadata.ingestion.source.dashboard.qlikcloud.models import (
     QlikApp,
     QlikAppResponse,
+    QlikDataFile,
+    QlikDataFiles,
     QlikScriptResult,
     QlikSpace,
     QlikSpaceResponse,
@@ -69,7 +72,7 @@ class QlikCloudClient:
             auth_header=AUTHORIZATION_HEADER,
             auth_token=lambda: (self.config.token.get_secret_value(), 0),
         )
-        self.client = REST(client_config)
+        self.client = TrackedREST(client_config, source_name="qlikcloud")
 
     def connect_websocket(self, dashboard_id: str = None) -> None:
         """
@@ -187,6 +190,10 @@ class QlikCloudClient:
             script_tables = self.get_script_tables()
             if script_tables:
                 parsed_datamodels.extend(script_tables)
+            # get data files
+            data_files = self.get_data_files()
+            if data_files:
+                parsed_datamodels.extend(data_files)
             return parsed_datamodels
         except Exception:
             logger.debug(traceback.format_exc())
@@ -236,3 +243,15 @@ class QlikCloudClient:
             logger.debug(traceback.format_exc())
             logger.warning("Failed to fetch the script tables")
         return script_tables
+
+    def get_data_files(self) -> List[QlikDataFile]:
+        """Get data files from the Qlik API"""
+        data_files = []
+        try:
+            resp = self.client.get("/v1/data-files?includeAllSpaces=true")
+            parsed_resp = QlikDataFiles(**resp)
+            data_files = parsed_resp.data or []
+        except Exception:
+            logger.debug(traceback.format_exc())
+            logger.warning("Failed to fetch data files from api `/v1/data-files`")
+        return data_files

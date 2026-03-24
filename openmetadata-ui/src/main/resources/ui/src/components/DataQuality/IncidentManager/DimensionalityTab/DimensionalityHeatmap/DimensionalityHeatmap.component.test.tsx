@@ -12,7 +12,7 @@
  */
 
 import { createTheme, Theme, ThemeProvider } from '@mui/material/styles';
-import { ThemeColors } from '@openmetadata/ui-core-components';
+import type { ThemeColors } from '@openmetadata/ui-core-components';
 import { fireEvent, render, screen } from '@testing-library/react';
 import React from 'react';
 import { TestCaseStatus } from '../../../../../generated/tests/dimensionResult';
@@ -37,6 +37,18 @@ const theme: Theme = createTheme({
 const Wrapper = ({ children }: { children: React.ReactNode }) => (
   <ThemeProvider theme={theme}>{children}</ThemeProvider>
 );
+
+jest.mock('@openmetadata/ui-core-components', () => ({
+  Typography: ({
+    as: Component = 'span',
+    children,
+    ...props
+  }: {
+    as?: React.ElementType;
+    children: React.ReactNode;
+    [key: string]: unknown;
+  }) => <Component {...props}>{children}</Component>,
+}));
 
 jest.mock('./useScrollIndicator.hook', () => ({
   useScrollIndicator: jest.fn(() => ({
@@ -92,7 +104,7 @@ describe('DimensionalityHeatmap Component', () => {
         { wrapper: Wrapper }
       );
 
-      expect(screen.getByRole('progressbar')).toBeInTheDocument();
+      expect(screen.getByTestId('loader')).toBeInTheDocument();
     });
 
     it('should render empty state when data is empty', () => {
@@ -279,7 +291,6 @@ describe('DimensionalityHeatmap Component', () => {
 
     it('should render right scroll indicator when showRightIndicator is true', () => {
       const mockUseScrollIndicator =
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
         require('./useScrollIndicator.hook').useScrollIndicator;
       const mockHandleScrollRight = jest.fn();
 
@@ -313,7 +324,6 @@ describe('DimensionalityHeatmap Component', () => {
 
     it('should render left scroll indicator when showLeftIndicator is true', () => {
       const mockUseScrollIndicator =
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
         require('./useScrollIndicator.hook').useScrollIndicator;
       const mockHandleScrollLeft = jest.fn();
 
@@ -347,7 +357,6 @@ describe('DimensionalityHeatmap Component', () => {
 
     it('should call handleScrollRight when right scroll indicator is clicked', () => {
       const mockUseScrollIndicator =
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
         require('./useScrollIndicator.hook').useScrollIndicator;
       const mockHandleScrollRight = jest.fn();
 
@@ -379,7 +388,6 @@ describe('DimensionalityHeatmap Component', () => {
 
     it('should call handleScrollLeft when left scroll indicator is clicked', () => {
       const mockUseScrollIndicator =
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
         require('./useScrollIndicator.hook').useScrollIndicator;
       const mockHandleScrollLeft = jest.fn();
 
@@ -411,7 +419,6 @@ describe('DimensionalityHeatmap Component', () => {
 
     it('should render both indicators when both are true', () => {
       const mockUseScrollIndicator =
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
         require('./useScrollIndicator.hook').useScrollIndicator;
 
       mockUseScrollIndicator.mockReturnValue({

@@ -37,6 +37,9 @@ from metadata.generated.schema.entity.services.connections.database.db2Connectio
 from metadata.generated.schema.entity.services.connections.database.deltaLakeConnection import (
     DeltaLakeType,
 )
+from metadata.generated.schema.entity.services.connections.database.dorisConnection import (
+    DorisType,
+)
 from metadata.generated.schema.entity.services.connections.database.exasolConnection import (
     ExasolType,
 )
@@ -49,8 +52,14 @@ from metadata.generated.schema.entity.services.connections.database.hiveConnecti
 from metadata.generated.schema.entity.services.connections.database.impalaConnection import (
     ImpalaType,
 )
+from metadata.generated.schema.entity.services.connections.database.informixConnection import (
+    InformixType,
+)
 from metadata.generated.schema.entity.services.connections.database.mariaDBConnection import (
     MariaDBType,
+)
+from metadata.generated.schema.entity.services.connections.database.microsoftFabricConnection import (
+    MicrosoftFabricType,
 )
 from metadata.generated.schema.entity.services.connections.database.mssqlConnection import (
     MssqlType,
@@ -75,6 +84,9 @@ from metadata.generated.schema.entity.services.connections.database.snowflakeCon
 )
 from metadata.generated.schema.entity.services.connections.database.sqliteConnection import (
     SQLiteType,
+)
+from metadata.generated.schema.entity.services.connections.database.starrocksConnection import (
+    StarrocksType,
 )
 from metadata.generated.schema.entity.services.connections.database.teradataConnection import (
     TeradataType,
@@ -147,6 +159,10 @@ MAP_CONNECTION_TYPE_DIALECT: Dict[str, Dialect] = {
     str(TrinoType.Trino.value): Dialect.TRINO,
     str(VerticaType.Vertica.value): Dialect.VERTICA,
     str(GreenplumType.Greenplum.value): Dialect.POSTGRES,
+    str(DorisType.Doris.value): Dialect.MYSQL,
+    str(StarrocksType.StarRocks.value): Dialect.MYSQL,
+    str(MicrosoftFabricType.MicrosoftFabric.value): Dialect.TSQL,
+    str(InformixType.Informix.value): Dialect.ANSI,
 }
 
 

@@ -52,10 +52,9 @@ export const navigateToSSOConfiguration = async (page: Page) => {
   // Use existing settingClick function to navigate to SSO settings
   await settingClick(page, GlobalSettingOptions.SSO);
 
-  // Wait for either provider selector or SSO configuration form to load
-  await page.waitForSelector(
-    '.provider-selector-container, [data-testid="sso-configuration-form-card"]'
-  );
+  // Wait for the SSO settings URL — covers all states:
+  // provider selector (no config), overview (existing config), or form card
+  await page.waitForURL(/settings\/sso/);
 };
 
 /**
@@ -86,7 +85,7 @@ export const enableSSOEditMode = async (page: Page) => {
  */
 export const selectSSOProvider = async (page: Page, provider: string) => {
   // Wait for provider selector to be visible
-  await page.waitForSelector('.provider-selector-container');
+  await page.locator('.provider-selector-container').waitFor();
 
   // Click on the provider card in the selection screen
   const providerLabel = getProviderLabel(provider);
@@ -96,9 +95,9 @@ export const selectSSOProvider = async (page: Page, provider: string) => {
   await providerCard.click();
 
   // Wait for the card to be selected
-  await page.waitForSelector(
-    `.provider-item.selected:has-text("${providerLabel}")`
-  );
+  await page
+    .locator(`.provider-item.selected:has-text("${providerLabel}")`)
+    .waitFor();
 
   // Click the Configure button to proceed to the form
   const configureButton = page.getByRole('button', { name: /configure/i });
@@ -106,7 +105,7 @@ export const selectSSOProvider = async (page: Page, provider: string) => {
   await configureButton.click();
 
   // Wait for the SSO configuration form to load
-  await page.waitForSelector('[data-testid="sso-configuration-form-card"]', {
+  await page.getByTestId('sso-configuration-form-card').waitFor({
     timeout: 10000,
   });
 };
@@ -257,7 +256,7 @@ export const resetToProviderSelector = async (page: Page) => {
     });
     if (await changeProviderButton.isVisible()) {
       await changeProviderButton.click();
-      await page.waitForSelector('.provider-selector-container');
+      await page.locator('.provider-selector-container').waitFor();
     }
   }
 };

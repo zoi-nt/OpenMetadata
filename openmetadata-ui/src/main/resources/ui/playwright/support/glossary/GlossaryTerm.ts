@@ -64,14 +64,18 @@ export class GlossaryTerm extends EntityClass {
   }
 
   async visitPage(page: Page) {
-    await visitGlossaryPage(page, this.responseData.glossary.displayName);
+    const glossaryDisplayName =
+      this.responseData.glossary?.displayName ?? this.glossary.data.displayName;
+    await visitGlossaryPage(page, glossaryDisplayName);
     const expandCollapseButtonText = await page
       .locator('[data-testid="expand-collapse-all-button"]')
       .textContent();
     const isExpanded = expandCollapseButtonText?.includes('Expand All');
     if (isExpanded) {
+      const glossaryId =
+        this.responseData.glossary?.id ?? this.glossary.responseData.id;
       const glossaryTermListResponse = page.waitForResponse(
-        `/api/v1/glossaryTerms?*glossary=${this.responseData.glossary.id}*`
+        `/api/v1/glossaryTerms?*glossary=${glossaryId}*`
       );
       await page.click('[data-testid="expand-collapse-all-button"]');
       await glossaryTermListResponse;
@@ -129,11 +133,20 @@ export class GlossaryTerm extends EntityClass {
   }
 
   async delete(apiContext: APIRequestContext) {
+    const fqn = this.responseData.fullyQualifiedName;
     const response = await apiContext.delete(
       `/api/v1/glossaryTerms/name/${encodeURIComponent(
-        this.responseData.fullyQualifiedName
+        fqn
       )}?recursive=true&hardDelete=true`
     );
+
+    if (!response.ok()) {
+      const errorText = await response.text();
+
+      throw new Error(
+        `Failed to delete glossary term "${fqn}": ${response.status()} ${response.statusText()} - ${errorText}`
+      );
+    }
 
     return await response.json();
   }

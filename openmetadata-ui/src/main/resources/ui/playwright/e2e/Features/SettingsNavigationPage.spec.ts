@@ -11,7 +11,7 @@
  *  limitations under the License.
  */
 
-import { expect, Page, test as base } from '@playwright/test';
+import { test as base, expect, Page } from '@playwright/test';
 import { GlobalSettingOptions } from '../../constant/settings';
 import { PersonaClass } from '../../support/persona/PersonaClass';
 import { UserClass } from '../../support/user/UserClass';
@@ -50,16 +50,14 @@ base.afterAll('Cleanup', async ({ browser }) => {
 const navigateToPersonaNavigation = async (page: Page) => {
   const getPersonas = page.waitForResponse('/api/v1/personas*');
   await settingClick(page, GlobalSettingOptions.PERSONA);
-  await page.waitForLoadState('networkidle');
   await getPersonas;
 
   await navigateToPersonaWithPagination(page, persona.data.name, true);
 
   await page.getByTestId('navigation').click();
-  await page.waitForLoadState('networkidle');
 };
 
-test.describe('Settings Navigation Page Tests', () => {
+test.describe.serial('Settings Navigation Page Tests', () => {
   test('should update navigation sidebar', async ({ page }) => {
     // Create and set default persona
     await redirectToHomePage(page);
@@ -77,9 +75,7 @@ test.describe('Settings Navigation Page Tests', () => {
     await expect(page.getByTestId('save-button')).toBeEnabled();
 
     // Make changes to enable save button
-    const exploreSwitch = page
-      .locator('.ant-tree-title:has-text("Explore")')
-      .locator('.ant-switch');
+    const exploreSwitch = page.getByTestId('navigation-switch-/explore');
 
     await exploreSwitch.click();
 
@@ -114,9 +110,7 @@ test.describe('Settings Navigation Page Tests', () => {
     await navigateToPersonaNavigation(page);
 
     // Make changes to trigger unsaved state
-    const navigateSwitch = page
-      .locator('.ant-tree-title:has-text("Explore")')
-      .locator('.ant-switch');
+    const navigateSwitch = page.getByTestId('navigation-switch-/explore');
 
     await navigateSwitch.click();
 
@@ -145,7 +139,6 @@ test.describe('Settings Navigation Page Tests', () => {
 
     // Test discard changes
     await page.getByTestId('unsaved-changes-modal-discard').click();
-    await page.waitForLoadState('networkidle');
 
     // Should navigate away and changes should be discarded
     await expect(page).toHaveURL(/.*settings.*/);
@@ -166,6 +159,9 @@ test.describe('Settings Navigation Page Tests', () => {
 
     await navigateSwitch.click();
 
+    // Verify save button is enabled to ensure change is registered
+    await expect(page.getByTestId('save-button')).toBeEnabled();
+
     // Try to navigate away
     await page
       .getByTestId('left-sidebar')
@@ -173,10 +169,9 @@ test.describe('Settings Navigation Page Tests', () => {
       .click();
 
     // Click "Save changes" to save and navigate
-    const saveResponse = page.waitForResponse('api/v1/docStore');
+    const saveResponse = page.waitForResponse('**/api/v1/docStore/**');
     await page.getByTestId('unsaved-changes-modal-save').click();
     await saveResponse;
-    await page.waitForLoadState('networkidle');
 
     // Should navigate to settings page
     await expect(page).toHaveURL(/.*settings.*/);
@@ -185,12 +180,9 @@ test.describe('Settings Navigation Page Tests', () => {
     await redirectToHomePage(page);
 
     // Check if Insights navigation item visibility changed
-    const insightsVisible = await page
-      .getByTestId('left-sidebar')
-      .getByTestId('app-bar-item-insights')
-      .isVisible();
-
-    expect(insightsVisible).toBe(false);
+    await expect(
+      page.getByTestId('left-sidebar').getByTestId('app-bar-item-insights')
+    ).toBeHidden();
 
     // Clean up: Restore original state
     await navigateToPersonaNavigation(page);
@@ -220,7 +212,7 @@ test.describe('Settings Navigation Page Tests', () => {
     // Verify save button is enabled
     await expect(page.getByTestId('save-button')).toBeEnabled();
 
-    expect(await domainSwitch.isChecked()).toBeFalsy();
+    await expect(domainSwitch).not.toBeChecked();
 
     // Test reset functionality
     await page.getByTestId('reset-button').click();
@@ -241,10 +233,104 @@ test.describe('Settings Navigation Page Tests', () => {
 
     // Test discard changes
     await page.getByTestId('unsaved-changes-modal-save').click();
-    await page.waitForLoadState('networkidle');
 
     // Verify reset worked - save button disabled and state reverted
-    expect(await domainSwitch.isChecked()).toBeTruthy();
+    await expect(domainSwitch).toBeChecked();
+    await expect(page.getByTestId('save-button')).not.toBeEnabled();
+  });
+
+  test('should support drag and drop reordering of navigation items', async ({
+    page,
+  }) => {
+    await redirectToHomePage(page);
+    await setUserDefaultPersona(page, persona.responseData.displayName);
+    await navigateToPersonaNavigation(page);
+
+    const treeItems = page.locator('.ant-tree-node-content-wrapper');
+
+    // Wait for the tree to be fully ready
+    await expect(treeItems.first()).toBeVisible();
+
+    const homeItem = treeItems.getByTitle('label.home');
+    const exploreItem = treeItems.getByTitle('label.explore');
+
+    const firstItemText = await homeItem.textContent();
+
+    expect(firstItemText).not.toBeNull();
+
+    const firstItemBox = await homeItem.boundingBox();
+    const secondItemBox = await exploreItem.boundingBox();
+
+    expect(firstItemBox).not.toBeNull();
+    expect(secondItemBox).not.toBeNull();
+
+    if (firstItemBox && secondItemBox) {
+      await homeItem.dragTo(exploreItem, {
+        sourcePosition: {
+          x: firstItemBox.width / 2,
+          y: firstItemBox.height / 2,
+        },
+        targetPosition: {
+          x: secondItemBox.width / 2,
+          y: secondItemBox.height / 2 + 10,
+        },
+      });
+      await expect(treeItems.first()).not.toHaveText(firstItemText as string);
+
+      // Now check if save button is enabled
+      const saveButton = page.getByTestId('save-button');
+
+      await expect(saveButton).toBeVisible();
+      await expect(saveButton).toBeEnabled();
+    }
+  });
+
+  test('should handle multiple items being hidden at once', async ({
+    page,
+  }) => {
+    await redirectToHomePage(page);
+    await setUserDefaultPersona(page, persona.responseData.displayName);
+    await navigateToPersonaNavigation(page);
+
+    const exploreSwitch = page.getByTestId('navigation-switch-/explore');
+    const insightsSwitch = page
+      .locator('.ant-tree-title:has-text("Insights")')
+      .locator('.ant-switch')
+      .first();
+
+    await exploreSwitch.click();
+    await insightsSwitch.click();
+
     await expect(page.getByTestId('save-button')).toBeEnabled();
+
+    const saveResponse = page.waitForResponse('**/api/v1/docStore/**');
+    await page.getByTestId('save-button').click();
+    await saveResponse;
+
+    await redirectToHomePage(page);
+
+    await page.locator('[data-testid="dropdown-profile"]').click();
+    await page
+      .locator('[role="menu"].profile-dropdown')
+      .waitFor({ state: 'visible' });
+
+    // Verify personas section is visible
+    await expect(page.getByText('Switch Persona')).toBeVisible();
+
+    // Initially should show limited personas (2 by default)
+    const initialPersonaLabels = page
+      .locator('[data-testid="persona-label"]')
+      .locator('input[type="radio"]');
+    await initialPersonaLabels.first().click();
+    await expect(page.getByTestId('app-bar-item-explore')).not.toBeVisible();
+    await expect(page.getByTestId('app-bar-item-insights')).not.toBeVisible();
+
+    await navigateToPersonaNavigation(page);
+    await exploreSwitch.click();
+    await insightsSwitch.click();
+
+    const restoreResponse = page.waitForResponse('**/api/v1/docStore/**');
+    await page.getByTestId('save-button').click();
+    await restoreResponse;
   });
 });

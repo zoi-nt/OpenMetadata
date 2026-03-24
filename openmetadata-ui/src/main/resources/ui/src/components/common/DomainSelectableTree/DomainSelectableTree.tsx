@@ -11,8 +11,8 @@
  *  limitations under the License.
  */
 
-import AddIcon from '@mui/icons-material/Add';
 import { Button as MUIButton, useTheme } from '@mui/material';
+import { Plus } from '@untitledui/icons';
 import { Button, Empty, Space, Spin, Tree, Typography } from 'antd';
 import Search from 'antd/lib/input/Search';
 import { AntTreeNodeProps } from 'antd/lib/tree';
@@ -70,6 +70,7 @@ const DomainSelectablTree: FC<DomainSelectableTreeProps> = ({
   isMultiple = false,
   initialDomains,
   showAllDomains = false,
+  isClearable = true,
 }) => {
   const theme = useTheme();
   const { t } = useTranslation();
@@ -193,69 +194,77 @@ const DomainSelectablTree: FC<DomainSelectableTreeProps> = ({
       parentFqn?: string,
       handleLoadMore?: (fqn: string) => void
     ): TreeListItem[] => {
+      const shouldAddLoadMore = (parentFqn?: string) => {
+        if (!parentFqn || !handleLoadMore) {
+          return false;
+        }
+        const paging = childPaging[parentFqn];
+        if (!paging) {
+          return false;
+        }
+
+        return paging.offset + paging.limit < paging.total;
+      };
+
       const processedItems: TreeListItem[] = [];
 
       for (const item of treeItems) {
         const itemFqn = item.key as string;
         const domain = domainMapper[itemFqn];
 
-        if (domain?.children && item.children) {
-          processedItems.push({
-            ...item,
-            children: addLoadMoreNodes(item.children, itemFqn, handleLoadMore),
-          });
-        } else {
-          processedItems.push(item);
-        }
+        const hasChildren = domain?.children && item.children;
+
+        processedItems.push(
+          hasChildren
+            ? {
+                ...item,
+                children: addLoadMoreNodes(
+                  item.children,
+                  itemFqn,
+                  handleLoadMore
+                ),
+              }
+            : item
+        );
       }
 
-      if (parentFqn && handleLoadMore) {
-        const paging = childPaging[parentFqn];
-        if (paging) {
-          const hasMoreChildren = paging.offset + paging.limit < paging.total;
-          const isLoadingMore = loadingChildren[parentFqn] ?? false;
+      if (parentFqn && shouldAddLoadMore(parentFqn)) {
+        const isLoadingMore = loadingChildren[parentFqn] ?? false;
 
-          if (hasMoreChildren) {
-            processedItems.push({
-              key: `${parentFqn}-load-more`,
-              value: `${parentFqn}-load-more`,
-              name: 'Load More',
-              label: 'Load More',
-              isLeaf: true,
-              selectable: false,
-              disabled: true,
-              className: 'load-more-node',
-              title: (
-                <MUIButton
-                  startIcon={isLoadingMore ? null : <AddIcon />}
-                  sx={{
-                    p: 0,
-                    ml: 7,
-                    cursor: 'pointer',
-                    fontSize: '14px',
-                    color: theme.palette.primary.main,
-                    fontWeight: theme.typography.fontWeightMedium,
-                    textTransform: 'none',
-                    '&:hover': {
-                      color: theme.palette.primary.dark,
-                      backgroundColor: 'transparent',
-                    },
-                  }}
-                  variant="text"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleLoadMore(parentFqn);
-                  }}>
-                  {isLoadingMore ? (
-                    <Loader size="small" />
-                  ) : (
-                    t('label.load-more')
-                  )}
-                </MUIButton>
-              ),
-            } as TreeListItem);
-          }
-        }
+        processedItems.push({
+          key: `${parentFqn}-load-more`,
+          value: `${parentFqn}-load-more`,
+          name: 'Load More',
+          label: 'Load More',
+          isLeaf: true,
+          selectable: false,
+          disabled: true,
+          className: 'load-more-node',
+          title: (
+            <MUIButton
+              startIcon={isLoadingMore ? null : <Plus />}
+              sx={{
+                p: 0,
+                ml: 7,
+                cursor: 'pointer',
+                fontSize: '14px',
+                color: theme.palette.primary.main,
+                fontWeight: theme.typography.fontWeightMedium,
+                textTransform: 'none',
+                '&:hover': {
+                  color: theme.palette.primary.dark,
+                  backgroundColor: 'transparent',
+                },
+              }}
+              variant="text"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleLoadMore?.(parentFqn);
+              }}>
+              {isLoadingMore ? <Loader size="small" /> : t('label.load-more')}
+            </MUIButton>
+          ),
+        } as TreeListItem);
       }
 
       return processedItems;
@@ -377,22 +386,10 @@ const DomainSelectablTree: FC<DomainSelectableTreeProps> = ({
           combinedData = [...domains, ...fetchedData];
         } else {
           combinedData = [...fetchedData];
-
-          // Ensure initialDomains are included
-          initialDomains?.forEach((selectedDomain) => {
-            const exists = combinedData.some((domain: Domain) =>
-              isDomainExist(domain, selectedDomain.fullyQualifiedName ?? '')
-            );
-            if (!exists) {
-              combinedData.unshift(selectedDomain as unknown as Domain);
-            }
-          });
         }
 
-        const uniqueData = uniqBy(combinedData, 'fullyQualifiedName');
-
-        setTreeData(convertDomainsToTreeOptions(uniqueData, 0, isMultiple));
-        setDomains(uniqueData);
+        setTreeData(convertDomainsToTreeOptions(combinedData, 0, isMultiple));
+        setDomains(combinedData);
 
         setPaging({
           offset: currentOffset,
@@ -412,6 +409,10 @@ const DomainSelectablTree: FC<DomainSelectableTreeProps> = ({
 
   const onSelect = (selectedKeys: React.Key[]) => {
     if (!isMultiple) {
+      if (selectedKeys.length === 0 && !isClearable) {
+        return;
+      }
+
       const selectedData = [];
       for (const item of selectedKeys) {
         const domain = domainMapper[item as string];

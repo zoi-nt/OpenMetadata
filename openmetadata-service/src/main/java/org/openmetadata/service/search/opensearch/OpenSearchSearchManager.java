@@ -69,6 +69,7 @@ import org.openmetadata.service.util.FullyQualifiedName;
 import os.org.opensearch.client.json.JsonData;
 import os.org.opensearch.client.json.JsonpMapper;
 import os.org.opensearch.client.opensearch.OpenSearchClient;
+import os.org.opensearch.client.opensearch._types.ErrorCause;
 import os.org.opensearch.client.opensearch._types.FieldValue;
 import os.org.opensearch.client.opensearch._types.OpenSearchException;
 import os.org.opensearch.client.opensearch._types.SearchType;
@@ -170,7 +171,15 @@ public class OpenSearchSearchManager implements SearchManagementClient {
                                                     t.field("sourceUrl")
                                                         .value(FieldValue.of(sourceUrl)))))));
 
-    SearchResponse<JsonData> response = client.search(searchRequest, JsonData.class);
+    Timer.Sample searchTimerSample = RequestLatencyContext.startSearchOperation();
+    SearchResponse<JsonData> response;
+    try {
+      response = client.search(searchRequest, JsonData.class);
+    } finally {
+      if (searchTimerSample != null) {
+        RequestLatencyContext.endSearchOperation(searchTimerSample);
+      }
+    }
     return Response.status(OK).entity(response.toJsonString()).build();
   }
 
@@ -200,7 +209,15 @@ public class OpenSearchSearchManager implements SearchManagementClient {
                                                         t.field("deleted")
                                                             .value(FieldValue.of(deleted)))))));
 
-    SearchResponse<JsonData> response = client.search(searchRequest, JsonData.class);
+    Timer.Sample searchTimerSample = RequestLatencyContext.startSearchOperation();
+    SearchResponse<JsonData> response;
+    try {
+      response = client.search(searchRequest, JsonData.class);
+    } finally {
+      if (searchTimerSample != null) {
+        RequestLatencyContext.endSearchOperation(searchTimerSample);
+      }
+    }
     return Response.status(OK).entity(response.toJsonString()).build();
   }
 
@@ -240,6 +257,17 @@ public class OpenSearchSearchManager implements SearchManagementClient {
       applySearchFilter(filter, requestBuilder);
     }
 
+    return doListWithOffset(limit, offset, index, searchSortFilter, requestBuilder);
+  }
+
+  @NotNull
+  private SearchResultListMapper doListWithOffset(
+      int limit,
+      int offset,
+      String index,
+      SearchSortFilter searchSortFilter,
+      OpenSearchRequestBuilder requestBuilder)
+      throws IOException {
     requestBuilder.timeout("30s");
     requestBuilder.from(offset);
     requestBuilder.size(limit);
@@ -268,7 +296,15 @@ public class OpenSearchSearchManager implements SearchManagementClient {
 
     try {
       SearchRequest searchRequest = requestBuilder.build(index);
-      SearchResponse<JsonData> response = client.search(searchRequest, JsonData.class);
+      Timer.Sample searchTimerSample = RequestLatencyContext.startSearchOperation();
+      SearchResponse<JsonData> response;
+      try {
+        response = client.search(searchRequest, JsonData.class);
+      } finally {
+        if (searchTimerSample != null) {
+          RequestLatencyContext.endSearchOperation(searchTimerSample);
+        }
+      }
 
       List<Map<String, Object>> results = new ArrayList<>();
       if (response.hits().hits() != null) {
@@ -294,9 +330,72 @@ public class OpenSearchSearchManager implements SearchManagementClient {
       if (e.status() == 404) {
         throw new SearchIndexNotFoundException(String.format("Failed to find index %s", index));
       } else {
-        throw new SearchException(String.format("Search failed due to %s", e.getMessage()));
+        throw buildSearchException(e);
       }
     }
+  }
+
+  @Override
+  public SearchResultListMapper listWithOffset(
+      String filter,
+      int limit,
+      int offset,
+      String index,
+      SearchSortFilter searchSortFilter,
+      String q,
+      String queryString,
+      SubjectContext subjectContext)
+      throws IOException {
+    if (!isClientAvailable) {
+      throw new IOException("OpenSearch client is not available");
+    }
+
+    OpenSearchRequestBuilder requestBuilder = new OpenSearchRequestBuilder();
+
+    if (!nullOrEmpty(q)) {
+      OpenSearchSourceBuilderFactory searchBuilderFactory = getSearchBuilderFactory();
+      requestBuilder =
+          searchBuilderFactory.getSearchSourceBuilderV2(index, q, offset, limit, false);
+    }
+
+    if (!nullOrEmpty(queryString)) {
+      try {
+        String queryToProcess = OsUtils.parseJsonQuery(queryString);
+        Query query = Query.of(qb -> qb.wrapper(w -> w.query(queryToProcess)));
+        requestBuilder.query(query);
+      } catch (Exception e) {
+        LOG.warn("Error parsing queryString using OsUtils: {}", e.getMessage());
+      }
+    }
+
+    if (!nullOrEmpty(filter) && !filter.equals("{}")) {
+      applySearchFilter(filter, requestBuilder);
+    }
+
+    // Apply RBAC query
+    if (shouldApplyRbacConditions(subjectContext, rbacConditionEvaluator)) {
+      OMQueryBuilder rbacQueryBuilder = rbacConditionEvaluator.evaluateConditions(subjectContext);
+      if (rbacQueryBuilder != null) {
+        Query rbacQuery = ((OpenSearchQueryBuilder) rbacQueryBuilder).buildV2();
+        Query existingQuery = requestBuilder.query();
+        if (existingQuery != null) {
+          Query combinedQuery =
+              Query.of(
+                  qb ->
+                      qb.bool(
+                          b -> {
+                            b.must(existingQuery);
+                            b.filter(rbacQuery);
+                            return b;
+                          }));
+          requestBuilder.query(combinedQuery);
+        } else {
+          requestBuilder.query(rbacQuery);
+        }
+      }
+    }
+
+    return doListWithOffset(limit, offset, index, searchSortFilter, requestBuilder);
   }
 
   @Override
@@ -338,13 +437,12 @@ public class OpenSearchSearchManager implements SearchManagementClient {
 
     // Handle searchAfter for deep pagination
     if (searchAfter != null && searchAfter.length > 0) {
-      List<String> searchAfterList = new ArrayList<>();
+      List<FieldValue> searchAfterList = new ArrayList<>();
       for (Object value : searchAfter) {
         if (value instanceof FieldValue) {
-          FieldValue fieldValue = (FieldValue) value;
-          searchAfterList.add(String.valueOf(fieldValue._get()));
+          searchAfterList.add((FieldValue) value);
         } else {
-          searchAfterList.add(String.valueOf(value));
+          searchAfterList.add(FieldValue.of(String.valueOf(value)));
         }
       }
       requestBuilder.searchAfter(searchAfterList);
@@ -375,7 +473,15 @@ public class OpenSearchSearchManager implements SearchManagementClient {
 
     try {
       SearchRequest searchRequest = requestBuilder.build(index);
-      SearchResponse<JsonData> response = client.search(searchRequest, JsonData.class);
+      Timer.Sample searchTimerSample = RequestLatencyContext.startSearchOperation();
+      SearchResponse<JsonData> response;
+      try {
+        response = client.search(searchRequest, JsonData.class);
+      } finally {
+        if (searchTimerSample != null) {
+          RequestLatencyContext.endSearchOperation(searchTimerSample);
+        }
+      }
 
       List<Map<String, Object>> results = new ArrayList<>();
       Object[] lastHitSortValues = null;
@@ -404,9 +510,10 @@ public class OpenSearchSearchManager implements SearchManagementClient {
 
         if (hits.size() <= size) {
           Hit<JsonData> lastHit = hits.getLast();
-          List<String> sortValues = lastHit.sort();
+          List<FieldValue> sortValues = lastHit.sort();
           if (sortValues != null && !sortValues.isEmpty()) {
-            lastDocumentsInBatch = sortValues.stream().map(String::valueOf).toArray(String[]::new);
+            lastDocumentsInBatch =
+                sortValues.stream().map(fv -> String.valueOf(fv._get())).toArray(String[]::new);
           }
         }
       }
@@ -422,7 +529,7 @@ public class OpenSearchSearchManager implements SearchManagementClient {
       if (e.status() == 404) {
         throw new SearchIndexNotFoundException(String.format("Failed to find index %s", index));
       } else {
-        throw new SearchException(String.format("Search failed due to %s", e.getMessage()));
+        throw buildSearchException(e);
       }
     }
   }
@@ -533,7 +640,15 @@ public class OpenSearchSearchManager implements SearchManagementClient {
 
       // Build and execute search request
       SearchRequest searchRequest = requestBuilder.build(request.getIndex());
-      SearchResponse<JsonData> response = client.search(searchRequest, JsonData.class);
+      Timer.Sample searchTimerSample = RequestLatencyContext.startSearchOperation();
+      SearchResponse<JsonData> response;
+      try {
+        response = client.search(searchRequest, JsonData.class);
+      } finally {
+        if (searchTimerSample != null) {
+          RequestLatencyContext.endSearchOperation(searchTimerSample);
+        }
+      }
 
       String responseJson = response.toJsonString();
       LOG.debug("Direct query search completed successfully");
@@ -725,7 +840,14 @@ public class OpenSearchSearchManager implements SearchManagementClient {
 
     Query boolQuery = Query.of(q -> q.bool(b -> b.must(mustQueries).filter(filterQueries)));
 
-    return client.search(s -> s.index(indexName).query(boolQuery).size(1000), JsonData.class);
+    Timer.Sample searchTimerSample = RequestLatencyContext.startSearchOperation();
+    try {
+      return client.search(s -> s.index(indexName).query(boolQuery).size(1000), JsonData.class);
+    } finally {
+      if (searchTimerSample != null) {
+        RequestLatencyContext.endSearchOperation(searchTimerSample);
+      }
+    }
   }
 
   /**
@@ -919,16 +1041,6 @@ public class OpenSearchSearchManager implements SearchManagementClient {
     // Apply RBAC query with caching
     applyRbacQueryWithCaching(subjectContext, requestBuilder);
 
-    // Check if semantic search is enabled and override the query
-    if (Boolean.TRUE.equals(request.getSemanticSearch())) {
-      SemanticSearchQueryBuilder semanticBuilder = new SemanticSearchQueryBuilder();
-      Query semanticQuery = semanticBuilder.buildSemanticQuery(request);
-      if (semanticQuery != null) {
-        requestBuilder.query(semanticQuery);
-        LOG.debug("Semantic search is enabled for this query");
-      }
-    }
-
     // Apply query filter
     if (!nullOrEmpty(request.getQueryFilter()) && !request.getQueryFilter().equals("{}")) {
       try {
@@ -967,8 +1079,10 @@ public class OpenSearchSearchManager implements SearchManagementClient {
 
     // Handle search_after for pagination
     if (!nullOrEmpty(request.getSearchAfter())) {
-      List<String> searchAfterValues =
-          request.getSearchAfter().stream().map(String::valueOf).collect(Collectors.toList());
+      List<FieldValue> searchAfterValues =
+          request.getSearchAfter().stream()
+              .map(v -> FieldValue.of(String.valueOf(v)))
+              .collect(Collectors.toList());
       requestBuilder.searchAfter(searchAfterValues);
     }
 
@@ -1100,7 +1214,7 @@ public class OpenSearchSearchManager implements SearchManagementClient {
         throw new SearchIndexNotFoundException(
             String.format("Failed to find index %s", request.getIndex()));
       } else {
-        throw new SearchException(String.format("Search failed due to %s", e.getMessage()));
+        throw buildSearchException(e);
       }
     }
   }
@@ -1114,8 +1228,12 @@ public class OpenSearchSearchManager implements SearchManagementClient {
     String indexName = request.getIndex();
     String glossaryTermIndex =
         Entity.getSearchRepository().getIndexMapping(GLOSSARY_TERM).getIndexName(clusterAlias);
+    String glossaryTermAlias =
+        Entity.getSearchRepository().getIndexMapping(GLOSSARY_TERM).getAlias(clusterAlias);
     String domainIndex =
         Entity.getSearchRepository().getIndexMapping(DOMAIN).getIndexName(clusterAlias);
+    String domainAlias =
+        Entity.getSearchRepository().getIndexMapping(DOMAIN).getAlias(clusterAlias);
 
     Query existingQuery = requestBuilder.query();
 
@@ -1137,7 +1255,8 @@ public class OpenSearchSearchManager implements SearchManagementClient {
                             q.matchPhrase(
                                 mp -> mp.field("displayName").query(request.getQuery()))));
 
-    if (indexName.equalsIgnoreCase(glossaryTermIndex)) {
+    if (indexName.equalsIgnoreCase(glossaryTermIndex)
+        || indexName.equalsIgnoreCase(glossaryTermAlias)) {
       baseQueryBuilder
           .should(
               Query.of(
@@ -1152,7 +1271,7 @@ public class OpenSearchSearchManager implements SearchManagementClient {
           .must(
               Query.of(
                   q -> q.match(m -> m.field("entityStatus").query(FieldValue.of("Approved")))));
-    } else if (indexName.equalsIgnoreCase(domainIndex)) {
+    } else if (indexName.equalsIgnoreCase(domainIndex) || indexName.equalsIgnoreCase(domainAlias)) {
       baseQueryBuilder
           .should(
               Query.of(
@@ -1167,7 +1286,8 @@ public class OpenSearchSearchManager implements SearchManagementClient {
     }
 
     baseQueryBuilder.minimumShouldMatch(1);
-    requestBuilder.query(baseQueryBuilder.build());
+    Query originalQuery = baseQueryBuilder.build();
+    requestBuilder.query(originalQuery);
 
     // Add fqnParts aggregation to fetch parent terms
     requestBuilder.aggregation(
@@ -1177,7 +1297,15 @@ public class OpenSearchSearchManager implements SearchManagementClient {
 
     // Execute search to get aggregations for parent terms
     SearchRequest searchRequest = requestBuilder.build(request.getIndex());
-    SearchResponse<JsonData> searchResponse = client.search(searchRequest, JsonData.class);
+    Timer.Sample searchTimerSample = RequestLatencyContext.startSearchOperation();
+    SearchResponse<JsonData> searchResponse;
+    try {
+      searchResponse = client.search(searchRequest, JsonData.class);
+    } finally {
+      if (searchTimerSample != null) {
+        RequestLatencyContext.endSearchOperation(searchTimerSample);
+      }
+    }
 
     if (searchResponse.aggregations() != null
         && searchResponse.aggregations().containsKey("fqnParts_agg")) {
@@ -1195,12 +1323,15 @@ public class OpenSearchSearchManager implements SearchManagementClient {
           parentTermQueries.add(matchQuery);
         }
 
-        // Replace the query entirely with parent term queries (not combine)
-        Query parentTermQuery =
+        // Combine the original query with parent term queries to preserve relevance scores
+        Query combinedQuery =
             Query.of(
                 q ->
                     q.bool(
                         b -> {
+                          // Add the original query as a should clause to preserve high scores
+                          b.should(originalQuery);
+                          // Add parent term queries as should clauses to fetch hierarchy
                           parentTermQueries.forEach(b::should);
                           if (indexName.equalsIgnoreCase(glossaryTermIndex)) {
                             b.must(
@@ -1213,14 +1344,29 @@ public class OpenSearchSearchManager implements SearchManagementClient {
                           b.minimumShouldMatch("1");
                           return b;
                         }));
-        requestBuilder.query(parentTermQuery);
+        requestBuilder.query(combinedQuery);
       }
     }
 
-    // Add sorting by fullyQualifiedName for consistent hierarchy ordering
+    // Add sorting by score first for relevance, then by fullyQualifiedName for consistent hierarchy
+    // ordering
+    requestBuilder.sort("_score", SortOrder.Desc, null);
     requestBuilder.sort("fullyQualifiedName", SortOrder.Asc, "keyword");
 
     return requestBuilder;
+  }
+
+  private static SearchException buildSearchException(OpenSearchException e) {
+    String detail = e.getMessage();
+    ErrorCause error = e.error();
+    if (error != null && error.rootCause() != null && !error.rootCause().isEmpty()) {
+      String rootCauses =
+          error.rootCause().stream()
+              .map(c -> c.type() + ": " + c.reason())
+              .collect(Collectors.joining("; "));
+      detail = String.format("%s | Root cause: [%s]", detail, rootCauses);
+    }
+    return new SearchException(String.format("Search failed due to %s", detail));
   }
 
   private List<?> buildSearchHierarchy(
@@ -1232,12 +1378,17 @@ public class OpenSearchSearchManager implements SearchManagementClient {
     String indexName = request.getIndex();
     String glossaryTermIndex =
         Entity.getSearchRepository().getIndexMapping(GLOSSARY_TERM).getIndexName(clusterAlias);
+    String glossaryTermAlias =
+        Entity.getSearchRepository().getIndexMapping(GLOSSARY_TERM).getAlias(clusterAlias);
     String domainIndex =
         Entity.getSearchRepository().getIndexMapping(DOMAIN).getIndexName(clusterAlias);
+    String domainAlias =
+        Entity.getSearchRepository().getIndexMapping(DOMAIN).getAlias(clusterAlias);
 
-    if (indexName.equalsIgnoreCase(glossaryTermIndex)) {
+    if (indexName.equalsIgnoreCase(glossaryTermIndex)
+        || indexName.equalsIgnoreCase(glossaryTermAlias)) {
       response = buildGlossaryTermSearchHierarchy(searchResponse);
-    } else if (indexName.equalsIgnoreCase(domainIndex)) {
+    } else if (indexName.equalsIgnoreCase(domainIndex) || indexName.equalsIgnoreCase(domainAlias)) {
       response = buildDomainSearchHierarchy(searchResponse);
     }
     return response;
@@ -1361,7 +1512,15 @@ public class OpenSearchSearchManager implements SearchManagementClient {
       addAggregationsToNLQQuery(requestBuilder, request.getIndex());
 
       SearchRequest searchRequest = requestBuilder.build(request.getIndex());
-      SearchResponse<JsonData> searchResponse = client.search(searchRequest, JsonData.class);
+      Timer.Sample searchTimerSample = RequestLatencyContext.startSearchOperation();
+      SearchResponse<JsonData> searchResponse;
+      try {
+        searchResponse = client.search(searchRequest, JsonData.class);
+      } finally {
+        if (searchTimerSample != null) {
+          RequestLatencyContext.endSearchOperation(searchTimerSample);
+        }
+      }
 
       return Response.status(Response.Status.OK).entity(searchResponse.toJsonString()).build();
     } catch (Exception e) {
@@ -1389,7 +1548,15 @@ public class OpenSearchSearchManager implements SearchManagementClient {
                     .query(query)
                     .size(1000));
 
-    SearchResponse<JsonData> searchResponse = client.search(searchRequest, JsonData.class);
+    Timer.Sample searchTimerSample = RequestLatencyContext.startSearchOperation();
+    SearchResponse<JsonData> searchResponse;
+    try {
+      searchResponse = client.search(searchRequest, JsonData.class);
+    } finally {
+      if (searchTimerSample != null) {
+        RequestLatencyContext.endSearchOperation(searchTimerSample);
+      }
+    }
 
     for (var hit : searchResponse.hits().hits()) {
       if (hit.source() != null) {
@@ -1436,7 +1603,15 @@ public class OpenSearchSearchManager implements SearchManagementClient {
                     .query(query)
                     .size(1000));
 
-    SearchResponse<JsonData> searchResponse = client.search(searchRequest, JsonData.class);
+    Timer.Sample searchTimerSample = RequestLatencyContext.startSearchOperation();
+    SearchResponse<JsonData> searchResponse;
+    try {
+      searchResponse = client.search(searchRequest, JsonData.class);
+    } finally {
+      if (searchTimerSample != null) {
+        RequestLatencyContext.endSearchOperation(searchTimerSample);
+      }
+    }
 
     for (var hit : searchResponse.hits().hits()) {
       if (hit.source() != null) {
@@ -1538,7 +1713,15 @@ public class OpenSearchSearchManager implements SearchManagementClient {
                     .query(finalBaseQuery)
                     .size(1000));
 
-    SearchResponse<JsonData> searchResponse = client.search(searchRequest, JsonData.class);
+    Timer.Sample searchTimerSample = RequestLatencyContext.startSearchOperation();
+    SearchResponse<JsonData> searchResponse;
+    try {
+      searchResponse = client.search(searchRequest, JsonData.class);
+    } finally {
+      if (searchTimerSample != null) {
+        RequestLatencyContext.endSearchOperation(searchTimerSample);
+      }
+    }
 
     for (var hit : searchResponse.hits().hits()) {
       if (hit.source() != null) {

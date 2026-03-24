@@ -82,6 +82,7 @@ import {
 import Assignees from '../../../../pages/TasksPage/shared/Assignees';
 import DescriptionTask from '../../../../pages/TasksPage/shared/DescriptionTask';
 import DescriptionTaskNew from '../../../../pages/TasksPage/shared/DescriptionTaskNew';
+import FeedbackApprovalTask from '../../../../pages/TasksPage/shared/FeedbackApprovalTask';
 import TagsTask from '../../../../pages/TasksPage/shared/TagsTask';
 import {
   Option,
@@ -173,18 +174,21 @@ export const TaskTabNew = ({
 
   const showAddSuggestionButton = useMemo(() => {
     const taskType = taskDetails?.type ?? ('' as TaskType);
-    const parsedSuggestion = [
-      TaskType.UpdateDescription,
-      TaskType.RequestDescription,
-    ].includes(taskType)
-      ? taskDetails?.suggestion
-      : JSON.parse(taskDetails?.suggestion || '[]');
+    let parsedSuggestion: string | TagLabel[] = taskDetails?.suggestion ?? '';
+
+    if (isTaskTags) {
+      try {
+        parsedSuggestion = JSON.parse(taskDetails?.suggestion || '[]');
+      } catch {
+        parsedSuggestion = [];
+      }
+    }
 
     return (
       [TaskType.RequestTag, TaskType.RequestDescription].includes(taskType) &&
       isEmpty(parsedSuggestion)
     );
-  }, [taskDetails]);
+  }, [taskDetails, isTaskTags]);
 
   const noSuggestionTaskMenuOptions = useMemo(() => {
     let label;
@@ -215,6 +219,9 @@ export const TaskTabNew = ({
     taskDetails?.type === TaskType.RequestTestCaseFailureResolution;
 
   const isTaskGlossaryApproval = taskDetails?.type === TaskType.RequestApproval;
+
+  const isTaskRecognizerFeedbackApproval =
+    taskDetails?.type === TaskType.RecognizerFeedbackApproval;
 
   const latestAction = useMemo(() => {
     const resolutionStatus = last(testCaseResolutionStatus);
@@ -359,13 +366,20 @@ export const TaskTabNew = ({
   };
 
   const onGlossaryTaskResolve = (status = 'approved') => {
-    const newValue = isTaskGlossaryApproval ? status : taskDetails?.suggestion;
+    const newValue =
+      isTaskGlossaryApproval || isTaskRecognizerFeedbackApproval
+        ? status
+        : taskDetails?.suggestion;
     const data = { newValue: newValue };
     updateTaskData(data as TaskDetails);
   };
 
   const onTaskResolve = () => {
-    if (!isTaskGlossaryApproval && isEmpty(taskDetails?.suggestion)) {
+    if (
+      !isTaskGlossaryApproval &&
+      !isTaskRecognizerFeedbackApproval &&
+      isEmpty(taskDetails?.suggestion)
+    ) {
       showErrorToast(
         t('message.field-text-is-required', {
           fieldText: isTaskTags
@@ -384,9 +398,10 @@ export const TaskTabNew = ({
 
       updateTaskData(tagsData as TaskDetails);
     } else {
-      const newValue = isTaskGlossaryApproval
-        ? 'approved'
-        : taskDetails?.suggestion;
+      const newValue =
+        isTaskGlossaryApproval || isTaskRecognizerFeedbackApproval
+          ? 'approved'
+          : taskDetails?.suggestion;
       const data = { newValue: newValue };
       updateTaskData(data as TaskDetails);
     }
@@ -451,6 +466,32 @@ export const TaskTabNew = ({
       });
   };
 
+  const onTaskReject = () => {
+    if (
+      !isTaskGlossaryApproval &&
+      !isTaskRecognizerFeedbackApproval &&
+      !hasAddedComment
+    ) {
+      showErrorToast(t('server.task-closed-without-comment'));
+
+      return;
+    }
+
+    const updatedComment =
+      isTaskGlossaryApproval || isTaskRecognizerFeedbackApproval
+        ? 'Rejected'
+        : recentComment;
+    updateTask(TaskOperation.REJECT, taskDetails?.id + '', {
+      comment: updatedComment,
+    } as unknown as TaskDetails)
+      .then(() => {
+        showSuccessToast(t('server.task-closed-successfully'));
+        rest.onAfterClose?.();
+        rest.onUpdateEntityDetails?.();
+      })
+      .catch((err: AxiosError) => showErrorToast(err));
+  };
+
   const handleMenuItemClick: MenuProps['onClick'] = (info) => {
     if (info.key === TaskActionMode.EDIT) {
       setShowEditTaskModel(true);
@@ -466,25 +507,6 @@ export const TaskTabNew = ({
         ...INCIDENT_TASK_ACTION_LIST,
       ].find((action) => action.key === info.key) ?? TASK_ACTION_LIST[0]
     );
-  };
-
-  const onTaskReject = () => {
-    if (!isTaskGlossaryApproval && !hasAddedComment) {
-      showErrorToast(t('server.task-closed-without-comment'));
-
-      return;
-    }
-
-    const updatedComment = isTaskGlossaryApproval ? 'Rejected' : recentComment;
-    updateTask(TaskOperation.REJECT, taskDetails?.id + '', {
-      comment: updatedComment,
-    } as unknown as TaskDetails)
-      .then(() => {
-        showSuccessToast(t('server.task-closed-successfully'));
-        rest.onAfterClose?.();
-        rest.onUpdateEntityDetails?.();
-      })
-      .catch((err: AxiosError) => showErrorToast(err));
   };
 
   const onTestCaseIncidentAssigneeUpdate = async () => {
@@ -643,9 +665,9 @@ export const TaskTabNew = ({
         size="small">
         <Tooltip
           title={
-            !hasApprovalAccess
-              ? t('message.only-reviewers-can-approve-or-reject')
-              : ''
+            hasApprovalAccess
+              ? ''
+              : t('message.only-reviewers-can-approve-or-reject')
           }>
           <Dropdown.Button
             className="task-action-button"
@@ -712,7 +734,7 @@ export const TaskTabNew = ({
   ]);
 
   const actionButtons = useMemo(() => {
-    if (isTaskGlossaryApproval) {
+    if (isTaskGlossaryApproval || isTaskRecognizerFeedbackApproval) {
       return approvalWorkflowActions;
     }
 
@@ -779,6 +801,7 @@ export const TaskTabNew = ({
     taskAction,
     isTaskClosed,
     isTaskGlossaryApproval,
+    isTaskRecognizerFeedbackApproval,
     showAddSuggestionButton,
     isCreator,
     approvalWorkflowActions,
@@ -795,14 +818,22 @@ export const TaskTabNew = ({
         taskDetails?.suggestion ?? taskDetails?.oldValue ?? '';
 
       return { description };
-    } else {
-      const updatedTags = JSON.parse(
-        taskDetails?.suggestion ?? taskDetails?.oldValue ?? '[]'
-      );
+    } else if (isTaskTags) {
+      let updatedTags: TagLabel[] = [];
+
+      try {
+        updatedTags = JSON.parse(
+          taskDetails?.suggestion ?? taskDetails?.oldValue ?? '[]'
+        );
+      } catch {
+        updatedTags = [];
+      }
 
       return { updatedTags };
     }
-  }, [taskDetails, isTaskDescription]);
+
+    return {};
+  }, [taskDetails, isTaskDescription, isTaskTags]);
 
   const handleAssigneeUpdate = async () => {
     setIsAssigneeLoading(true);
@@ -880,26 +911,24 @@ export const TaskTabNew = ({
       })}>
       <div className="d-flex gap-2" data-testid="task-assignees">
         <Row className="m-l-0" gutter={[16, 16]}>
-          <Col className="flex items-center gap-2 text-grey-muted" span={8}>
+          <Col
+            className="flex items-center gap-2 text-grey-muted"
+            span={8}
+            style={{ paddingLeft: 0 }}>
             <UserIcon height={16} />
             <Typography.Text className="incident-manager-details-label">
               {t('label.created-by')}
             </Typography.Text>
           </Col>
-          <Col span={16}>
+          <Col span={16} style={{ paddingLeft: '2px' }}>
             <Link
               className="no-underline flex items-center gap-2"
               to={getUserPath(taskThread.createdBy ?? '')}>
-              <UserPopOverCard userName={taskThread.createdBy ?? ''}>
-                <div className="d-flex items-center">
-                  <ProfilePicture
-                    name={taskThread.createdBy ?? ''}
-                    width="24"
-                  />
-                </div>
-              </UserPopOverCard>
-
-              <Typography.Text>{taskThread.createdBy}</Typography.Text>
+              <UserPopOverCard
+                showUserName
+                profileWidth={22}
+                userName={taskThread.createdBy ?? ''}
+              />
             </Link>
           </Col>
 
@@ -950,27 +979,29 @@ export const TaskTabNew = ({
             </Form>
           ) : (
             <>
-              <Col className="flex gap-2 text-grey-muted" span={8}>
+              <Col
+                className="flex gap-2 text-grey-muted"
+                span={8}
+                style={{ paddingLeft: 0 }}>
                 <AssigneesIcon height={16} />
                 <Typography.Text className="incident-manager-details-label @grey-8">
                   {t('label.assignee-plural')}
                 </Typography.Text>
               </Col>
-              <Col className="flex gap-2" span={16}>
+              <Col
+                className="flex gap-2"
+                span={16}
+                style={{ paddingLeft: '2px' }}>
                 {taskThread?.task?.assignees?.length === 1 ? (
                   <div className="d-flex items-center gap-2">
                     <UserPopOverCard
-                      userName={taskThread?.task?.assignees[0].name ?? ''}>
-                      <div className="d-flex items-center">
-                        <ProfilePicture
-                          name={taskThread?.task?.assignees[0].name ?? ''}
-                          width="24"
-                        />
-                      </div>
-                    </UserPopOverCard>
-                    <Typography.Text className="text-grey-body">
-                      {getEntityName(taskThread?.task?.assignees[0])}
-                    </Typography.Text>
+                      showUserName
+                      displayName={getEntityName(
+                        taskThread?.task?.assignees[0]
+                      )}
+                      profileWidth={22}
+                      userName={taskThread?.task?.assignees[0]?.name ?? ''}
+                    />
                   </div>
                 ) : (
                   <OwnerLabel
@@ -1123,6 +1154,12 @@ export const TaskTabNew = ({
               task={taskDetails}
               onChange={(value) => form.setFieldValue('updatedTags', value)}
             />
+          </div>
+        )}
+
+        {isTaskRecognizerFeedbackApproval && taskDetails && (
+          <div className="feedback-details-container">
+            <FeedbackApprovalTask task={taskDetails} />
           </div>
         )}
         {taskThread.task?.status === ThreadTaskStatus.Open &&

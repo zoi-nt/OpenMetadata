@@ -12,8 +12,10 @@
  */
 import test, { expect, Request } from '@playwright/test';
 import { GlobalSettingOptions } from '../../constant/settings';
+import { SidebarItem } from '../../constant/sidebar';
 import { redirectToHomePage } from '../../utils/common';
-import { settingClick } from '../../utils/sidebar';
+import { settingClick, sidebarClick } from '../../utils/sidebar';
+import { PLAYWRIGHT_BASIC_TEST_TAG_OBJ } from '../../constant/config';
 
 const config = {
   logo: 'https://custom-logo.png',
@@ -26,14 +28,20 @@ const themeConfig = {
   primaryColor: '#6809dc',
   infoColor: '#2196f3',
   successColor: '#008376',
+  hoverColor: '#d1e9ff',
+  selectedColor: '#175cd3',
   warningColor: '#ffc34e',
   errorColor: '#ff4c3b',
+};
+const updatedColor = {
+  hoverColor: '#d1ffeb',
+  selectedColor: '#1d6713',
 };
 
 // use the admin user to login
 test.use({ storageState: 'playwright/.auth/admin.json' });
 
-test.describe('Custom Theme Config Page', () => {
+test.describe('Custom Theme Config Page', PLAYWRIGHT_BASIC_TEST_TAG_OBJ, () => {
   test.beforeEach('Visit Home Page', async ({ page }) => {
     await redirectToHomePage(page);
     await settingClick(page, GlobalSettingOptions.APPEARANCE);
@@ -109,6 +117,62 @@ test.describe('Custom Theme Config Page', () => {
     );
   });
 
+  test('Update Hover and selected Color ', async ({ page }) => {
+    for (const colorType of Object.keys(updatedColor)) {
+      await page
+        .locator(`[data-testid="${colorType}-color-input"]`)
+        .fill(updatedColor[colorType as keyof typeof updatedColor]);
+    }
+
+    const updatedConfigResponsePromise = page.waitForResponse(
+      '/api/v1/system/settings'
+    );
+
+    // Click the save button
+    await page.locator('[data-testid="save-btn"]').click();
+
+    const updatedConfigResponse = await updatedConfigResponsePromise;
+
+    // Verify the response status code
+    expect(updatedConfigResponse.status()).toBe(200);
+
+    await expect
+      .poll(async () => {
+        return await page.evaluate(() => {
+          const styles = getComputedStyle(document.documentElement);
+
+          return {
+            hoverColor: styles.getPropertyValue('--tw-color-brand-100').trim(),
+            selectedColor: styles
+              .getPropertyValue('--tw-color-brand-700')
+              .trim(),
+          };
+        });
+      })
+      .toEqual({
+        hoverColor: '#d1ffeb',
+        selectedColor: '#1d6713',
+      });
+
+    const defaultConfigResponsePromise = page.waitForResponse(
+      '/api/v1/system/settings'
+    );
+    await settingClick(page, GlobalSettingOptions.APPEARANCE);
+    // Click the reset button
+    await page.locator('[data-testid="reset-button"]').click();
+
+    const defaultConfigResponse = await defaultConfigResponsePromise;
+
+    // Verify the response status code
+    expect(defaultConfigResponse.status()).toBe(200);
+
+    // Verify the default theme color
+    await expect(page.getByTestId('reset-button')).toHaveCSS(
+      'background-color',
+      'rgb(21, 112, 239)'
+    );
+  });
+
   test('Should call customMonogramUrlPath only once after save if the monogram is not valid', async ({
     page,
   }) => {
@@ -140,7 +204,7 @@ test.describe('Custom Theme Config Page', () => {
     await page.locator('[data-testid="save-btn"]').click();
     await saveResponse;
 
-    // Wait a bit more to catch any additional requests
+    // eslint-disable-next-line playwright/no-wait-for-timeout -- wait to catch any additional monogram requests after save
     await page.waitForTimeout(2000);
 
     // Assert monogram URL was called at most once after save

@@ -26,6 +26,9 @@ import static org.openmetadata.service.resources.tags.TagLabelUtil.addDerivedTag
 import static org.openmetadata.service.resources.tags.TagLabelUtil.checkMutuallyExclusive;
 import static org.openmetadata.service.util.EntityUtil.getSearchIndexField;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -58,6 +61,7 @@ import org.openmetadata.service.resources.searchindex.SearchIndexResource;
 import org.openmetadata.service.security.mask.PIIMasker;
 import org.openmetadata.service.util.EntityUtil;
 import org.openmetadata.service.util.EntityUtil.Fields;
+import org.openmetadata.service.util.EntityUtil.RelationIncludes;
 import org.openmetadata.service.util.FullyQualifiedName;
 
 public class SearchIndexRepository extends EntityRepository<SearchIndex> {
@@ -89,32 +93,51 @@ public class SearchIndexRepository extends EntityRepository<SearchIndex> {
 
   @Override
   public void prepare(SearchIndex searchIndex, boolean update) {
-    SearchService searchService = Entity.getEntity(searchIndex.getService(), "", ALL);
+    var searchService = (SearchService) getCachedParentOrLoad(searchIndex.getService(), "", ALL);
     searchIndex.setService(searchService.getEntityReference());
     searchIndex.setServiceType(searchService.getServiceType());
   }
 
   @Override
+  protected List<String> getFieldsStrippedFromStorageJson() {
+    return List.of("service");
+  }
+
+  @Override
+  protected ObjectNode storageJsonNode(SearchIndex searchIndex) {
+    ObjectNode node = super.storageJsonNode(searchIndex);
+    stripFieldTags(node.get("fields"));
+    return node;
+  }
+
+  private void stripFieldTags(JsonNode fieldsNode) {
+    if (!(fieldsNode instanceof ArrayNode fieldArray)) {
+      return;
+    }
+    for (JsonNode field : fieldArray) {
+      if (!(field instanceof ObjectNode fieldNode)) {
+        continue;
+      }
+      fieldNode.remove("tags");
+      stripFieldTags(fieldNode.get("children"));
+    }
+  }
+
+  @Override
   public void storeEntity(SearchIndex searchIndex, boolean update) {
-    // Relationships and fields such as service are derived and not stored as part of json
-    EntityReference service = searchIndex.getService();
-    searchIndex.withService(null);
-
-    // Don't store fields tags as JSON but build it on the fly based on relationships
-    List<SearchIndexField> fieldsWithTags = null;
-    if (searchIndex.getFields() != null) {
-      fieldsWithTags = searchIndex.getFields();
-      searchIndex.setFields(cloneWithoutTags(fieldsWithTags));
-      searchIndex.getFields().forEach(field -> field.setTags(null));
-    }
-
     store(searchIndex, update);
+  }
 
-    // Restore the relationships
-    if (fieldsWithTags != null) {
-      searchIndex.setFields(fieldsWithTags);
-    }
-    searchIndex.withService(service);
+  @Override
+  public void storeEntities(List<SearchIndex> searchIndexes) {
+    storeMany(searchIndexes);
+  }
+
+  @Override
+  protected void clearEntitySpecificRelationshipsForMany(List<SearchIndex> entities) {
+    if (entities.isEmpty()) return;
+    List<UUID> ids = entities.stream().map(SearchIndex::getId).toList();
+    deleteToMany(ids, entityType, Relationship.CONTAINS, null);
   }
 
   @Override
@@ -123,9 +146,27 @@ public class SearchIndexRepository extends EntityRepository<SearchIndex> {
   }
 
   @Override
-  public void setFields(SearchIndex searchIndex, Fields fields) {
+  protected void storeEntitySpecificRelationshipsForMany(List<SearchIndex> entities) {
+    List<CollectionDAO.EntityRelationshipObject> relationships = new ArrayList<>();
+    for (SearchIndex searchIndex : entities) {
+      EntityReference service = searchIndex.getService();
+      if (service == null || service.getId() == null) {
+        continue;
+      }
+      relationships.add(
+          newRelationship(
+              service.getId(),
+              searchIndex.getId(),
+              service.getType(),
+              entityType,
+              Relationship.CONTAINS));
+    }
+    bulkInsertRelationships(relationships);
+  }
+
+  @Override
+  public void setFields(SearchIndex searchIndex, Fields fields, RelationIncludes relationIncludes) {
     searchIndex.setService(getContainer(searchIndex.getId()));
-    searchIndex.setFollowers(fields.contains(FIELD_FOLLOWERS) ? getFollowers(searchIndex) : null);
     if (searchIndex.getFields() != null) {
       getFieldTags(fields.contains(FIELD_TAGS), searchIndex.getFields());
     }
@@ -286,27 +327,6 @@ public class SearchIndexRepository extends EntityRepository<SearchIndex> {
     }
   }
 
-  List<SearchIndexField> cloneWithoutTags(List<SearchIndexField> fields) {
-    if (nullOrEmpty(fields)) {
-      return fields;
-    }
-    List<SearchIndexField> copy = new ArrayList<>();
-    fields.forEach(f -> copy.add(cloneWithoutTags(f)));
-    return copy;
-  }
-
-  private SearchIndexField cloneWithoutTags(SearchIndexField field) {
-    List<SearchIndexField> children = cloneWithoutTags(field.getChildren());
-    return new SearchIndexField()
-        .withDescription(field.getDescription())
-        .withName(field.getName())
-        .withDisplayName(field.getDisplayName())
-        .withFullyQualifiedName(field.getFullyQualifiedName())
-        .withDataType(field.getDataType())
-        .withDataTypeDisplay(field.getDataTypeDisplay())
-        .withChildren(children);
-  }
-
   @Override
   public void validateTags(SearchIndex entity) {
     super.validateTags(entity);
@@ -345,6 +365,11 @@ public class SearchIndexRepository extends EntityRepository<SearchIndex> {
   }
 
   @Override
+  protected EntityReference getParentReference(SearchIndex entity) {
+    return entity.getService();
+  }
+
+  @Override
   public EntityInterface getParentEntity(SearchIndex entity, String fields) {
     if (entity.getService() == null) {
       return null;
@@ -369,7 +394,7 @@ public class SearchIndexRepository extends EntityRepository<SearchIndex> {
   public TaskWorkflow getTaskWorkflow(ThreadContext threadContext) {
     validateTaskThread(threadContext);
     EntityLink entityLink = threadContext.getAbout();
-    if (entityLink.getFieldName().equals("fields")) {
+    if (entityLink.getFieldName() != null && entityLink.getFieldName().equals("fields")) {
       TaskType taskType = threadContext.getThread().getTask().getType();
       if (EntityUtil.isDescriptionTask(taskType)) {
         return new FieldDescriptionWorkflow(threadContext);
@@ -509,19 +534,41 @@ public class SearchIndexRepository extends EntityRepository<SearchIndex> {
     @Transaction
     @Override
     public void entitySpecificUpdate(boolean consolidatingChanges) {
-      if (updated.getFields() != null) {
-        updateSearchIndexFields(
-            "fields",
-            original.getFields() == null ? null : original.getFields(),
-            updated.getFields(),
-            EntityUtil.searchIndexFieldMatch);
-      }
-      recordChange(
+      compareAndUpdate(
+          "fields",
+          () -> {
+            if (updated.getFields() != null) {
+              updateSearchIndexFields(
+                  "fields",
+                  original.getFields() == null ? null : original.getFields(),
+                  updated.getFields(),
+                  EntityUtil.searchIndexFieldMatch);
+            }
+          });
+      compareAndUpdate(
           "searchIndexSettings",
-          original.getSearchIndexSettings(),
-          updated.getSearchIndexSettings());
-      recordChange("sourceHash", original.getSourceHash(), updated.getSourceHash());
-      recordChange("indexType", original.getIndexType(), updated.getIndexType());
+          () -> {
+            recordChange(
+                "searchIndexSettings",
+                original.getSearchIndexSettings(),
+                updated.getSearchIndexSettings());
+          });
+      compareAndUpdate(
+          "sourceHash",
+          () -> {
+            recordChange(
+                "sourceHash",
+                original.getSourceHash(),
+                updated.getSourceHash(),
+                false,
+                EntityUtil.objectMatch,
+                false);
+          });
+      compareAndUpdate(
+          "indexType",
+          () -> {
+            recordChange("indexType", original.getIndexType(), updated.getIndexType());
+          });
     }
 
     private void updateSearchIndexFields(

@@ -74,7 +74,7 @@ public class ApplicationHandler {
         new OpenMetadataConnectionBuilder(config, app.getBot().getName()).build());
     try {
       AppPrivateConfig appPrivateConfig = configReader.readConfigFromResource(app.getName());
-      app.setPreview(appPrivateConfig.getPreview());
+      app.setEnabled(appPrivateConfig.getEnabled());
 
       if (appPrivateConfig.getParameters() != null
           && appPrivateConfig.getParameters().getAdditionalProperties() != null) {
@@ -87,23 +87,25 @@ public class ApplicationHandler {
     }
   }
 
-  public Boolean isPreview(String appName) {
+  public Boolean isEnabled(String appName) {
     try {
       AppPrivateConfig appPrivateConfig = configReader.readConfigFromResource(appName);
-      return appPrivateConfig.getPreview();
+      return appPrivateConfig.getEnabled();
     } catch (IOException e) {
       LOG.debug("Config file for app {} not found: ", appName, e);
-      return false;
+      return true;
     } catch (ConfigurationException e) {
       LOG.error("Error reading config file for app {}", appName, e);
-      return false;
+      return true;
     }
   }
 
   public void cleanupStaleJobs() {
     try {
       LOG.info("Cleaning up stale application jobs from previous server runs");
-      Entity.getCollectionDAO().appExtensionTimeSeriesDao().markAllStaleEntriesFailed();
+      CollectionDAO.AppExtensionTimeSeries dao =
+          Entity.getCollectionDAO().appExtensionTimeSeriesDao();
+      dao.markAllStaleEntriesFailedExcludingApp("SearchIndexingApplication");
       LOG.info("Stale application jobs cleanup completed successfully");
     } catch (Exception e) {
       LOG.error("Failed to cleanup stale application jobs", e);
@@ -156,6 +158,48 @@ public class ApplicationHandler {
       LOG.error("Failed to uninstall application {}", app.getName(), e);
       throw AppException.byMessage(
           app.getName(), "install", e.getMessage(), Response.Status.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  public App appWithDecryptedAppConfiguration(
+      App app, CollectionDAO daoCollection, SearchRepository searchRepository) {
+    try {
+      Map<String, Object> decryptedAppConfig =
+          runAppInit(app, daoCollection, searchRepository, true)
+              .decryptConfiguration(JsonUtils.getMap(app.getAppConfiguration()));
+      return app.withAppConfiguration(decryptedAppConfig);
+    } catch (ClassNotFoundException
+        | NoSuchMethodException
+        | InvocationTargetException
+        | InstantiationException
+        | IllegalAccessException e) {
+      LOG.error("Failed to decrypt application configuration for {}", app.getName(), e);
+      throw AppException.byMessage(
+          app.getName(),
+          "decryptAppConfiguration",
+          e.getMessage(),
+          Response.Status.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  public App appWithEncryptedAppConfiguration(
+      App app, CollectionDAO daoCollection, SearchRepository searchRepository) {
+    try {
+      Map<String, Object> encryptedAppConfig =
+          runAppInit(app, daoCollection, searchRepository, true)
+              .encryptConfiguration(JsonUtils.getMap(app.getAppConfiguration()));
+      return app.withAppConfiguration(encryptedAppConfig);
+    } catch (ClassNotFoundException
+        | NoSuchMethodException
+        | InvocationTargetException
+        | InstantiationException
+        | IllegalAccessException e) {
+      LOG.error("Failed to encrypt application configuration for {}", app.getName(), e);
+      throw AppException.byMessage(
+          app.getName(),
+          "encryptAppConfiguration",
+          e.getMessage(),
+          Response.Status.INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -253,7 +297,10 @@ public class ApplicationHandler {
   }
 
   public AbstractNativeApplication runAppInit(
-      App app, CollectionDAO daoCollection, SearchRepository searchRepository, boolean forDelete)
+      App app,
+      CollectionDAO daoCollection,
+      SearchRepository searchRepository,
+      boolean skipEnabledCheck)
       throws ClassNotFoundException,
           NoSuchMethodException,
           InvocationTargetException,
@@ -266,9 +313,8 @@ public class ApplicationHandler {
     AbstractNativeApplication resource =
         clz.getDeclaredConstructor(CollectionDAO.class, SearchRepository.class)
             .newInstance(daoCollection, searchRepository);
-    // Raise preview message if the app is in Preview mode
-    if (!forDelete && Boolean.TRUE.equals(app.getPreview())) {
-      resource.raisePreviewMessage(app);
+    if (!skipEnabledCheck && Boolean.FALSE.equals(app.getEnabled())) {
+      resource.raiseNotEnabledMessage(app);
     }
 
     resource.init(app);
@@ -305,8 +351,9 @@ public class ApplicationHandler {
         appRepository.getUpdater(currentApp, updatedApp, EntityRepository.Operation.PATCH, null);
     updater.update();
     AppScheduler.getInstance().deleteScheduledApplication(updatedApp);
-    AppScheduler.getInstance().scheduleApplication(updatedApp);
-    LOG.info("migrated app configuration for {}", application.getName());
+    LOG.info(
+        "migrated app configuration for {}, will be rescheduled by install()",
+        application.getName());
   }
 
   public void fixCorruptedInstallation(App application) throws SchedulerException {
@@ -323,10 +370,11 @@ public class ApplicationHandler {
     }
     String appName = jobDataMap.getString(APP_NAME);
     if (appName == null) {
-      LOG.info("corrupt entry for app {}, reinstalling", application.getName());
+      LOG.info(
+          "corrupt entry for app {}, deleting corrupt job. Will be rescheduled by install()",
+          application.getName());
       App app = appRepository.getDao().findEntityByName(application.getName());
       AppScheduler.getInstance().deleteScheduledApplication(app);
-      AppScheduler.getInstance().scheduleApplication(app);
     }
   }
 

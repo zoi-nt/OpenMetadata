@@ -11,7 +11,16 @@
  *  limitations under the License.
  */
 import { EntityTypeEndpoint } from '../support/entity/Entity.interface';
+import { ApiServiceClass } from '../support/entity/service/ApiServiceClass';
+import { DashboardServiceClass } from '../support/entity/service/DashboardServiceClass';
+import { DatabaseServiceClass } from '../support/entity/service/DatabaseServiceClass';
+import { MessagingServiceClass } from '../support/entity/service/MessagingServiceClass';
+import { MlmodelServiceClass } from '../support/entity/service/MlmodelServiceClass';
+import { PipelineServiceClass } from '../support/entity/service/PipelineServiceClass';
+import { SearchIndexServiceClass } from '../support/entity/service/SearchIndexServiceClass';
+import { StorageServiceClass } from '../support/entity/service/StorageServiceClass';
 import { uuid } from '../utils/common';
+import type { SettingOptionsType } from '../utils/sidebar';
 import { GlobalSettingOptions, ServiceTypes } from './settings';
 
 export const SERVICE_TYPE = {
@@ -104,4 +113,49 @@ export const DBT = {
   dataQualityTest2: 'not_null_customers_customer_id',
 };
 
+export const SERVICE_SEARCH_INDEX_MAP = {
+  [GlobalSettingOptions.DATABASES]: 'databaseService',
+  [GlobalSettingOptions.MESSAGING]: 'messagingService',
+  [GlobalSettingOptions.DASHBOARDS]: 'dashboardService',
+  [GlobalSettingOptions.PIPELINES]: 'pipelineService',
+  [GlobalSettingOptions.MLMODELS]: 'mlModelService',
+  [GlobalSettingOptions.STORAGES]: 'storageService',
+  [GlobalSettingOptions.SEARCH]: 'searchService',
+  [GlobalSettingOptions.APIS]: 'apiService',
+  [GlobalSettingOptions.DRIVES]: 'driveService',
+  [GlobalSettingOptions.METADATA]: 'metadataService',
+} as const;
+
+export type ServiceSearchIndexKey = keyof typeof SERVICE_SEARCH_INDEX_MAP;
+
+export const getServiceSearchIndexMappings = (
+  serviceEntityMap: Record<ServiceSearchIndexKey, string>
+): {
+  settingOption: SettingOptionsType;
+  expectedIndex: string;
+  entityName: string;
+}[] =>
+  (
+    Object.entries(SERVICE_SEARCH_INDEX_MAP) as [
+      ServiceSearchIndexKey,
+      string
+    ][]
+  ).map(([settingOption, expectedIndex]) => ({
+    settingOption,
+    expectedIndex,
+    entityName: serviceEntityMap[settingOption],
+  }));
+
 export const MAX_CONSECUTIVE_ERRORS = 3;
+
+// Service entity classes
+export const SERVICE_ENTITIES = {
+  'Api Service': ApiServiceClass,
+  'Dashboard Service': DashboardServiceClass,
+  'Database Service': DatabaseServiceClass,
+  'Messaging Service': MessagingServiceClass,
+  'Mlmodel Service': MlmodelServiceClass,
+  'Pipeline Service': PipelineServiceClass,
+  'SearchIndex Service': SearchIndexServiceClass,
+  'Storage Service': StorageServiceClass,
+} as const;

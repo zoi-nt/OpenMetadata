@@ -25,12 +25,11 @@ test.describe('API docs should work properly', () => {
     await page.locator('[data-testid="help-icon"]').click();
     await page.getByRole('link', { name: 'API', exact: true }).click();
 
-    await page.waitForLoadState('networkidle');
     await page
       .getByTestId('fluid-container')
       .getByTestId('loader')
       .waitFor({ state: 'detached' });
-    await page.waitForSelector('[data-content-id="overview"]', {
+    await page.locator('[data-content-id="overview"]').waitFor({
       state: 'visible',
     });
 
@@ -46,5 +45,16 @@ test.describe('API docs should work properly', () => {
         exact: true,
       })
     ).toBeVisible();
+
+    // Validate authentication part
+    await page.locator('#link-auth').click();
+    await expect(
+      page.locator('#apiKey-_rapidoc_api_key-api-key-input')
+    ).toBeVisible();
+
+    // ensure token is set when visiting API page
+    await expect(
+      page.locator('#apiKey-_rapidoc_api_key-api-key-input')
+    ).toHaveValue(/^Bearer\s+[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
   });
 });

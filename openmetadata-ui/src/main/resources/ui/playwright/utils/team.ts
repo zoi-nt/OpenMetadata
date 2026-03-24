@@ -20,24 +20,63 @@ import { UserClass } from '../support/user/UserClass';
 import {
   assignDomain,
   descriptionBox,
+  redirectToHomePage,
   toastNotification,
   uuid,
 } from './common';
-import { addMultiOwner, addOwner } from './entity';
+import {
+  addMultiOwner,
+  addOwner,
+  waitForAllLoadersToDisappear,
+} from './entity';
 import { validateFormNameFieldInput } from './form';
 import { settingClick } from './sidebar';
 
 const TEAM_TYPES = ['Department', 'Division', 'Group'];
 
-export const createTeam = async (page: Page, isPublic?: boolean) => {
+interface SearchTeamOptions {
+  expectEmptyResults?: boolean;
+  expectNotFound?: boolean;
+}
+
+export const openTeamsPage = async (page: Page) => {
+  const searchBar = page.getByTestId('searchbar');
+  if (await searchBar.isVisible().catch(() => false)) {
+    return searchBar;
+  }
+
+  await page.goto('/settings/members/teams', { waitUntil: 'domcontentloaded' });
+
+  if (!(await searchBar.isVisible().catch(() => false))) {
+    await redirectToHomePage(page);
+    await settingClick(page, GlobalSettingOptions.TEAMS);
+  }
+
+  await expect(searchBar).toBeVisible({ timeout: 60000 });
+
+  return searchBar;
+};
+
+export const createTeam = async (
+  page: Page,
+  isPublic?: boolean,
+  overrides?: Partial<{
+    name: string;
+    displayName: string;
+    email: string;
+    description: string;
+    fullyQualifiedName: string;
+  }>
+) => {
   const teamData = {
     name: `pw%team-${uuid()}`,
     displayName: `PW ${uuid()}`,
     email: `pwteam${uuid()}@example.com`,
     description: 'This is a PW team',
+    ...overrides,
   };
 
-  await page.waitForSelector('[role="dialog"].ant-modal');
+  await page.locator('[role="dialog"].ant-modal').waitFor();
 
   await expect(page.locator('[role="dialog"].ant-modal')).toBeVisible();
 
@@ -52,18 +91,26 @@ export const createTeam = async (page: Page, isPublic?: boolean) => {
   await page.locator(descriptionBox).isVisible();
   await page.locator(descriptionBox).fill(teamData.description);
 
-  const createTeamResponse = page.waitForResponse('/api/v1/teams');
+  const createTeamResponse = page.waitForResponse(
+    (response) =>
+      response.url().includes('/api/v1/teams') &&
+      response.request().method() === 'POST'
+  );
 
   await page.locator('button[type="submit"]').click();
 
-  await createTeamResponse;
+  const response = await createTeamResponse;
+  const createdTeam = await response.json();
 
-  await page.waitForLoadState('networkidle');
-  await page.waitForSelector('[data-testid="loader"]', {
-    state: 'detached',
-  });
+  await waitForAllLoadersToDisappear(page);
 
-  return teamData;
+  return {
+    ...teamData,
+    name: createdTeam.name ?? teamData.name,
+    displayName: createdTeam.displayName ?? teamData.displayName,
+    fullyQualifiedName:
+      createdTeam.fullyQualifiedName ?? overrides?.fullyQualifiedName,
+  };
 };
 
 export const softDeleteTeam = async (page: Page) => {
@@ -98,7 +145,7 @@ export const hardDeleteTeam = async (page: Page) => {
     .click();
   await page.getByTestId('delete-button').click();
 
-  await page.waitForSelector('[role="dialog"].ant-modal');
+  await page.locator('[role="dialog"].ant-modal').waitFor();
 
   await expect(page.locator('[role="dialog"].ant-modal')).toBeVisible();
 
@@ -268,17 +315,46 @@ export const removeOrganizationPolicyAndRole = async (
 export const searchTeam = async (
   page: Page,
   teamName: string,
-  searchWillBeEmpty?: boolean
+  options?: SearchTeamOptions
 ) => {
-  const searchResponse = page.waitForResponse('/api/v1/search/query?q=**');
-
+  const searchBar = await openTeamsPage(page);
   await page.fill('[data-testid="searchbar"]', teamName);
-  await searchResponse;
 
-  if (searchWillBeEmpty) {
-    await expect(page.getByTestId('search-error-placeholder')).toBeVisible();
+  if (options?.expectEmptyResults) {
+    await expect
+      .poll(
+        async () => {
+          const hasPlaceholder = await page
+            .getByTestId('search-error-placeholder')
+            .isVisible()
+            .catch(() => false);
+          const matchingRows = await page
+            .getByRole('cell', { name: teamName })
+            .count();
+
+          return hasPlaceholder || matchingRows === 0;
+        },
+        { timeout: 30000, intervals: [500, 1000, 2000] }
+      )
+      .toBe(true);
+  } else if (options?.expectNotFound) {
+    await expect
+      .poll(async () => page.getByRole('cell', { name: teamName }).count(), {
+        timeout: 30000,
+        intervals: [500, 1000, 2000],
+      })
+      .toBe(0);
   } else {
-    await expect(page.getByRole('cell', { name: teamName })).toBeVisible();
+    await expect
+      .poll(
+        async () =>
+          page
+            .getByRole('cell', { name: teamName })
+            .isVisible()
+            .catch(() => false),
+        { timeout: 30000, intervals: [500, 1000, 2000] }
+      )
+      .toBe(true);
   }
 };
 
@@ -328,6 +404,34 @@ export const verifyAssetsInTeamsPage = async (
   ).toContainText(assetCount.toString());
 };
 
+export const verifyTeamListingAssetCount = async (
+  page: Page,
+  team: TeamClass,
+  expectedCount: number
+) => {
+  await page
+    .goto(`/settings/members/teams/${encodeURIComponent(team.data.name)}`, {
+      waitUntil: 'commit',
+    })
+    .catch(() => undefined);
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/settings/members/teams/${encodeURIComponent(team.data.name).replace(
+        /[.*+?^${}()|[\]\\]/g,
+        '\\$&'
+      )}$`
+    )
+  );
+
+  const res = page.waitForResponse('/api/v1/search/query?*size=15*');
+  await page.getByTestId('assets').click();
+  await res;
+
+  await expect(
+    page.getByTestId('assets').getByTestId('filter-count')
+  ).toHaveText(expectedCount.toString());
+};
+
 export const addUserInTeam = async (page: Page, user: UserClass) => {
   const userName = user.data.email.split('@')[0];
   const fetchUsersResponse = page.waitForResponse(
@@ -368,7 +472,7 @@ export const addUserInTeam = async (page: Page, user: UserClass) => {
 
 export const checkTeamTabCount = async (page: Page) => {
   const fetchResponse = page.waitForResponse(
-    '/api/v1/teams/name/*?fields=*childrenCount*include=all'
+    '/api/v1/teams?parentTeam=Organization&include=non-deleted&fields=**'
   );
 
   await settingClick(page, GlobalSettingOptions.TEAMS);
@@ -376,11 +480,13 @@ export const checkTeamTabCount = async (page: Page) => {
   const response = await fetchResponse;
   const jsonRes = await response.json();
 
+  const childrenCount = jsonRes.data?.length ?? 0;
+
   await expect(
     page.locator(
       '[data-testid="teams"] [data-testid="count"] [data-testid="filter-count"]'
     )
-  ).toContainText(jsonRes.childrenCount.toString());
+  ).toContainText(childrenCount.toString());
 };
 
 export const addEmailTeam = async (page: Page, email: string) => {
@@ -395,11 +501,7 @@ export const addEmailTeam = async (page: Page, email: string) => {
   // Reload the page
   await page.reload();
 
-  await page.waitForLoadState('networkidle');
-
-  await page.waitForSelector('[data-testid="loader"]', {
-    state: 'detached',
-  });
+  await waitForAllLoadersToDisappear(page);
 
   // Check for updated email
   await expect(page.locator('[data-testid="email-value"]')).toContainText(
@@ -485,11 +587,7 @@ export const executionOnOwnerTeam = async (
 
   const newTeamData = await createTeam(page);
 
-  await page.waitForLoadState('networkidle');
-
-  await page.waitForSelector('[data-testid="loader"]', {
-    state: 'detached',
-  });
+  await waitForAllLoadersToDisappear(page);
 
   await expect(
     page.getByRole('cell', { name: newTeamData.displayName })

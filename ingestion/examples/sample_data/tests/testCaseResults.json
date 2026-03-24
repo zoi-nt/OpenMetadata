@@ -708,6 +708,26 @@
                         {
                             "name": "addedRows",
                             "value": "2234"
+                        },
+                        {
+                            "name": "addedColumns",
+                            "value": "2"
+                        },
+                        {
+                            "name": "removedColumns",
+                            "value": "1"
+                        },
+                        {
+                            "name": "changedColumns",
+                            "value": "1"
+                        },
+                        {
+                            "name": "schemaTable1",
+                            "value": "serviceType='BigQuery' fullyQualifiedTableName='ecommerce_db.shopify.dim_address' schema={'order_id': Integer(_notes=[], precision=0, python_type=<class 'int'>), 'quantity': Integer(_notes=[], precision=0, python_type=<class 'int'>), 'product_id': Integer(_notes=[], precision=0, python_type=<class 'int'>), 'customer_id': Integer(_notes=[], precision=0, python_type=<class 'int'>), 'status': String_VaryingAlphanum(_notes=[], collation=None), 'order_date': Date(_notes=[], precision=6, rounds=True), 'price': Decimal(_notes=[], precision=2)}"
+                        },
+                        {
+                            "name": "schemaTable2",
+                            "value": "serviceType='BigQuery' fullyQualifiedTableName='shopify.production_dim_address' schema={'user_id': Integer(_notes=[], precision=0, python_type=<class 'int'>), 'id': Integer(_notes=[], precision=0, python_type=<class 'int'>), 'cycle_name': String_VaryingAlphanum(_notes=[], collation=None), 'status': String_VaryingAlphanum(_notes=[], collation=None), 'order_date': Date(_notes=[], precision=6, rounds=True)}"
                         }
                     ]
                 }
@@ -748,7 +768,7 @@
                     [
                         "+",
                         "facf92d7-05ea-43d2-ba2a-067d63dee60c",
-                        "a8d30187-1409-4606-9259-322a4f6caf74",
+                        "e02e1fac-b650-4db8-8c9d-5fa5edf5d863",
                         "Amber",
                         "Albert",
                         "3170 Warren Orchard Apt. 834",
@@ -796,9 +816,116 @@
                         {
                             "name": "changedColumns",
                             "value": "1"
+                        },
+                        {
+                            "name": "schemaTable1",
+                            "value": "serviceType='BigQuery' fullyQualifiedTableName='ecommerce_db.shopify.dim_address' schema={'order_id': Integer(_notes=[], precision=0, python_type=<class 'int'>), 'quantity': Integer(_notes=[], precision=0, python_type=<class 'int'>), 'product_id': Integer(_notes=[], precision=0, python_type=<class 'int'>), 'customer_id': Integer(_notes=[], precision=0, python_type=<class 'int'>), 'status': String_VaryingAlphanum(_notes=[], collation=None), 'order_date': Date(_notes=[], precision=6, rounds=True), 'price': Decimal(_notes=[], precision=2)}"
+                        },
+                        {
+                            "name": "schemaTable2",
+                            "value": "serviceType='BigQuery' fullyQualifiedTableName='shopify.production_dim_address' schema={'user_id': Integer(_notes=[], precision=0, python_type=<class 'int'>), 'id': Integer(_notes=[], precision=0, python_type=<class 'int'>), 'cycle_name': String_VaryingAlphanum(_notes=[], collation=None), 'status': String_VaryingAlphanum(_notes=[], collation=None), 'order_date': Date(_notes=[], precision=6, rounds=True)}"
                         }
                     ]
                 }
+            ]
+        },
+        {
+            "name": "not_null_customers_customer_id",
+            "tableFqn": "postgres_sample.jaffle_shop.public.customers",
+            "results": [
+                { "result": "0 null values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "nullCount", "value": "0" }] },
+                { "result": "0 null values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "nullCount", "value": "0" }] },
+                { "result": "0 null values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "nullCount", "value": "0" }] },
+                { "result": "0 null values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "nullCount", "value": "0" }] },
+                { "result": "0 null values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "nullCount", "value": "0" }] }
+            ]
+        },
+        {
+            "name": "unique_customers_customer_id",
+            "tableFqn": "postgres_sample.jaffle_shop.public.customers",
+            "results": [
+                { "result": "0 duplicate values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "duplicateCount", "value": "0" }] },
+                { "result": "0 duplicate values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "duplicateCount", "value": "0" }] },
+                { "result": "0 duplicate values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "duplicateCount", "value": "0" }] },
+                { "result": "0 duplicate values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "duplicateCount", "value": "0" }] },
+                { "result": "0 duplicate values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "duplicateCount", "value": "0" }] }
+            ]
+        },
+        {
+            "name": "accepted_values_customers_status",
+            "tableFqn": "postgres_sample.jaffle_shop.public.customers",
+            "results": [
+                { "result": "Found 100 rows, expected between 1 and 10000", "testCaseStatus": "Success", "testResultValues": [{ "name": "rowCount", "value": "100" }] },
+                { "result": "Found 100 rows, expected between 1 and 10000", "testCaseStatus": "Success", "testResultValues": [{ "name": "rowCount", "value": "100" }] },
+                { "result": "Found 0 rows, expected between 1 and 10000", "testCaseStatus": "Failed", "testResultValues": [{ "name": "rowCount", "value": "0" }] },
+                { "result": "Found 100 rows, expected between 1 and 10000", "testCaseStatus": "Success", "testResultValues": [{ "name": "rowCount", "value": "100" }] },
+                { "result": "Found 0 rows, expected between 1 and 10000", "testCaseStatus": "Failed", "testResultValues": [{ "name": "rowCount", "value": "0" }] }
+            ]
+        },
+        {
+            "name": "not_null_orders_order_id",
+            "tableFqn": "postgres_sample.jaffle_shop.public.orders",
+            "results": [
+                { "result": "0 null values found in column order_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "nullCount", "value": "0" }] },
+                { "result": "0 null values found in column order_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "nullCount", "value": "0" }] },
+                { "result": "0 null values found in column order_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "nullCount", "value": "0" }] },
+                { "result": "0 null values found in column order_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "nullCount", "value": "0" }] },
+                { "result": "0 null values found in column order_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "nullCount", "value": "0" }] }
+            ]
+        },
+        {
+            "name": "unique_orders_order_id",
+            "tableFqn": "postgres_sample.jaffle_shop.public.orders",
+            "results": [
+                { "result": "0 duplicate values found in column order_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "duplicateCount", "value": "0" }] },
+                { "result": "0 duplicate values found in column order_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "duplicateCount", "value": "0" }] },
+                { "result": "0 duplicate values found in column order_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "duplicateCount", "value": "0" }] },
+                { "result": "0 duplicate values found in column order_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "duplicateCount", "value": "0" }] },
+                { "result": "0 duplicate values found in column order_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "duplicateCount", "value": "0" }] }
+            ]
+        },
+        {
+            "name": "accepted_values_orders_status",
+            "tableFqn": "postgres_sample.jaffle_shop.public.orders",
+            "results": [
+                { "result": "Found 5 values not in set: [placed, shipped, completed, return_pending, returned]", "testCaseStatus": "Failed", "testResultValues": [{ "name": "forbiddenCount", "value": "5" }] },
+                { "result": "Found 3 values not in set: [placed, shipped, completed, return_pending, returned]", "testCaseStatus": "Failed", "testResultValues": [{ "name": "forbiddenCount", "value": "3" }] },
+                { "result": "0 forbidden values found in column status", "testCaseStatus": "Success", "testResultValues": [{ "name": "forbiddenCount", "value": "0" }] },
+                { "result": "Found 2 values not in set: [placed, shipped, completed, return_pending, returned]", "testCaseStatus": "Failed", "testResultValues": [{ "name": "forbiddenCount", "value": "2" }] },
+                { "result": "0 forbidden values found in column status", "testCaseStatus": "Success", "testResultValues": [{ "name": "forbiddenCount", "value": "0" }] }
+            ]
+        },
+        {
+            "name": "relationships_orders_customer_id",
+            "tableFqn": "postgres_sample.jaffle_shop.public.orders",
+            "results": [
+                { "result": "0 null values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "nullCount", "value": "0" }] },
+                { "result": "Found 2 null values in column customer_id", "testCaseStatus": "Failed", "testResultValues": [{ "name": "nullCount", "value": "2" }] },
+                { "result": "0 null values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "nullCount", "value": "0" }] },
+                { "result": "Found 1 null value in column customer_id", "testCaseStatus": "Failed", "testResultValues": [{ "name": "nullCount", "value": "1" }] },
+                { "result": "0 null values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "nullCount", "value": "0" }] }
+            ]
+        },
+        {
+            "name": "not_null_stg_customers_customer_id",
+            "tableFqn": "postgres_sample.jaffle_shop.public.stg_customers",
+            "results": [
+                { "result": "0 null values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "nullCount", "value": "0" }] },
+                { "result": "0 null values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "nullCount", "value": "0" }] },
+                { "result": "0 null values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "nullCount", "value": "0" }] },
+                { "result": "0 null values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "nullCount", "value": "0" }] },
+                { "result": "0 null values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "nullCount", "value": "0" }] }
+            ]
+        },
+        {
+            "name": "unique_stg_customers_customer_id",
+            "tableFqn": "postgres_sample.jaffle_shop.public.stg_customers",
+            "results": [
+                { "result": "0 duplicate values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "duplicateCount", "value": "0" }] },
+                { "result": "0 duplicate values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "duplicateCount", "value": "0" }] },
+                { "result": "0 duplicate values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "duplicateCount", "value": "0" }] },
+                { "result": "0 duplicate values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "duplicateCount", "value": "0" }] },
+                { "result": "0 duplicate values found in column customer_id", "testCaseStatus": "Success", "testResultValues": [{ "name": "duplicateCount", "value": "0" }] }
             ]
         }
     ]

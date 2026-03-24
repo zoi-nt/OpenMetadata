@@ -25,6 +25,8 @@ import com.auth0.jwt.interfaces.DecodedJWT;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.security.KeyFactory;
+import java.security.interfaces.ECPrivateKey;
+import java.security.interfaces.ECPublicKey;
 import java.security.interfaces.RSAPrivateKey;
 import java.security.interfaces.RSAPublicKey;
 import java.security.spec.PKCS8EncodedKeySpec;
@@ -52,7 +54,10 @@ public class JWTTokenGenerator {
   private static final String EMAIL_CLAIM = "email";
   private static final String IS_BOT_CLAIM = "isBot";
   public static final String TOKEN_TYPE = "tokenType";
+  public static final String PREFERRED_USERNAME = "preferred_username";
+  public static final String USERNAME = "username";
   public static final String IMPERSONATED_USER_CLAIM = "impersonatedUser";
+  public static final String SCOPE_CLAIM = "scope";
   private static final JWTTokenGenerator INSTANCE = new JWTTokenGenerator();
   private RSAPrivateKey privateKey;
   @Getter private RSAPublicKey publicKey;
@@ -116,6 +121,19 @@ public class JWTTokenGenerator {
       long expiryInSeconds,
       boolean isBot,
       ServiceTokenType tokenType) {
+    return generateJWTToken(
+        userName, roles, isAdmin, email, expiryInSeconds, isBot, tokenType, null);
+  }
+
+  public JWTAuthMechanism generateJWTToken(
+      String userName,
+      Set<String> roles,
+      boolean isAdmin,
+      String email,
+      long expiryInSeconds,
+      boolean isBot,
+      ServiceTokenType tokenType,
+      List<String> scopes) {
     return getJwtAuthMechanism(
         userName,
         roles,
@@ -124,7 +142,8 @@ public class JWTTokenGenerator {
         isBot,
         tokenType,
         getCustomExpiryDate(expiryInSeconds),
-        null);
+        null,
+        scopes);
   }
 
   public JWTAuthMechanism getJwtAuthMechanism(
@@ -136,9 +155,21 @@ public class JWTTokenGenerator {
       ServiceTokenType tokenType,
       Date expires,
       JWTTokenExpiry expiry) {
+    return getJwtAuthMechanism(
+        userName, roles, isAdmin, email, isBot, tokenType, expires, expiry, null);
+  }
+
+  public JWTAuthMechanism getJwtAuthMechanism(
+      String userName,
+      Set<String> roles,
+      boolean isAdmin,
+      String email,
+      boolean isBot,
+      ServiceTokenType tokenType,
+      Date expires,
+      JWTTokenExpiry expiry,
+      List<String> scopes) {
     try {
-      // Handle the Admin Role Here Since there is no Admin Role as such , just a isAdmin flag in
-      // User Schema
       if (isAdmin) {
         if (nullOrEmpty(roles)) {
           roles = Set.of(ADMIN_ROLE);
@@ -148,7 +179,7 @@ public class JWTTokenGenerator {
       }
       JWTAuthMechanism jwtAuthMechanism = new JWTAuthMechanism().withJWTTokenExpiry(expiry);
       Algorithm algorithm = getAlgorithm(tokenValidationAlgorithm, null, privateKey);
-      String token =
+      var tokenBuilder =
           JWT.create()
               .withIssuer(issuer)
               .withKeyId(kid)
@@ -157,9 +188,16 @@ public class JWTTokenGenerator {
               .withClaim(EMAIL_CLAIM, email)
               .withClaim(IS_BOT_CLAIM, isBot)
               .withClaim(TOKEN_TYPE, tokenType.value())
+              .withClaim(USERNAME, userName)
+              .withClaim(PREFERRED_USERNAME, userName)
               .withIssuedAt(new Date(System.currentTimeMillis()))
-              .withExpiresAt(expires)
-              .sign(algorithm);
+              .withExpiresAt(expires);
+
+      if (scopes != null && !scopes.isEmpty()) {
+        tokenBuilder.withClaim(SCOPE_CLAIM, String.join(" ", scopes));
+      }
+
+      String token = tokenBuilder.sign(algorithm);
       jwtAuthMechanism.setJWTToken(token);
       jwtAuthMechanism.setJWTTokenExpiresAt(expires != null ? expires.getTime() : null);
       return jwtAuthMechanism;
@@ -255,12 +293,42 @@ public class JWTTokenGenerator {
 
   public static Algorithm getAlgorithm(
       AuthenticationConfiguration.TokenValidationAlgorithm algorithm,
-      RSAPublicKey publicKey,
-      RSAPrivateKey privateKey) {
+      RSAPublicKey rsaPublicKey,
+      RSAPrivateKey rsaPrivateKey) {
     return switch (algorithm) {
-      case RS_256 -> Algorithm.RSA256(publicKey, privateKey);
-      case RS_384 -> Algorithm.RSA384(publicKey, privateKey);
-      case RS_512 -> Algorithm.RSA512(publicKey, privateKey);
+      case RS_256 -> Algorithm.RSA256(rsaPublicKey, rsaPrivateKey);
+      case RS_384 -> Algorithm.RSA384(rsaPublicKey, rsaPrivateKey);
+      case RS_512 -> Algorithm.RSA512(rsaPublicKey, rsaPrivateKey);
+      case ES_256, ES_384, ES_512 -> throw new IllegalArgumentException(
+          "EC algorithms require ECPublicKey/ECPrivateKey. Use getAlgorithm(algorithm, ecPublicKey, ecPrivateKey) instead.");
     };
+  }
+
+  public static Algorithm getAlgorithm(
+      AuthenticationConfiguration.TokenValidationAlgorithm algorithm,
+      ECPublicKey ecPublicKey,
+      ECPrivateKey ecPrivateKey) {
+    return switch (algorithm) {
+      case ES_256 -> Algorithm.ECDSA256(ecPublicKey, ecPrivateKey);
+      case ES_384 -> Algorithm.ECDSA384(ecPublicKey, ecPrivateKey);
+      case ES_512 -> Algorithm.ECDSA512(ecPublicKey, ecPrivateKey);
+      case RS_256, RS_384, RS_512 -> throw new IllegalArgumentException(
+          "RSA algorithms require RSAPublicKey/RSAPrivateKey. Use getAlgorithm(algorithm, rsaPublicKey, rsaPrivateKey) instead.");
+    };
+  }
+
+  public static Algorithm getAlgorithmFromPublicKey(
+      AuthenticationConfiguration.TokenValidationAlgorithm algorithm,
+      java.security.PublicKey publicKey) {
+    if (publicKey instanceof RSAPublicKey rsaPublicKey) {
+      return getAlgorithm(algorithm, rsaPublicKey, null);
+    } else if (publicKey instanceof ECPublicKey ecPublicKey) {
+      return getAlgorithm(algorithm, ecPublicKey, null);
+    } else {
+      throw new IllegalArgumentException(
+          "Unsupported public key type: "
+              + publicKey.getClass().getSimpleName()
+              + ". Only RSA and EC keys are supported.");
+    }
   }
 }

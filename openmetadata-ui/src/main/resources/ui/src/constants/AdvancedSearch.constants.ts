@@ -177,6 +177,25 @@ export const CONTAINER_DROPDOWN_ITEMS = [
   },
 ];
 
+export const COLUMN_DROPDOWN_ITEMS = [
+  {
+    label: 'label.data-type',
+    key: EntityFields.DATA_TYPE,
+  },
+  {
+    label: 'label.table',
+    key: EntityFields.TABLE_NAME,
+  },
+  {
+    label: 'label.database',
+    key: EntityFields.DATABASE,
+  },
+  {
+    label: 'label.schema',
+    key: EntityFields.DATABASE_SCHEMA,
+  },
+];
+
 export const GLOSSARY_DROPDOWN_ITEMS = [
   {
     label: 'label.domain-plural',
@@ -286,8 +305,50 @@ export const GLOSSARY_ASSETS_DROPDOWN_ITEMS = [
   },
 ];
 
+export const TAG_ASSETS_DROPDOWN_ITEMS = [
+  {
+    label: 'label.entity-type-plural',
+    labelKeyOptions: {
+      entity: 'label.entity',
+    },
+    key: EntityFields.ENTITY_TYPE,
+  },
+  {
+    label: 'label.domain-plural',
+    key: EntityFields.DOMAINS,
+  },
+  {
+    label: 'label.owner-plural',
+    key: EntityFields.OWNERS,
+  },
+  {
+    label: 'label.tag',
+    key: EntityFields.TAG,
+  },
+  {
+    label: 'label.tier',
+    key: EntityFields.TIER,
+  },
+  {
+    label: 'label.service',
+    key: EntityFields.SERVICE,
+  },
+  {
+    label: 'label.service-type',
+    key: EntityFields.SERVICE_TYPE,
+  },
+];
+
 export const LINEAGE_DROPDOWN_ITEMS = [
   ...COMMON_DROPDOWN_ITEMS,
+  {
+    label: 'label.database',
+    key: EntityFields.DATABASE,
+  },
+  {
+    label: 'label.schema',
+    key: EntityFields.DATABASE_SCHEMA,
+  },
   {
     label: 'label.column',
     key: EntityFields.COLUMN,
@@ -310,13 +371,28 @@ export const TEXT_FIELD_DESCRIPTION_OPERATORS = [
   'is_not_null',
 ];
 
+export const MULTISELECT_FIELD_OPERATORS = [
+  'multiselect_contains',
+  'multiselect_not_contains',
+  'multiselect_equals',
+  'multiselect_not_equals',
+  'is_null',
+  'is_not_null',
+];
+
 export const RANGE_FIELD_OPERATORS = ['between', 'not_between'];
+
+export const NUMBER_FIELD_OPERATORS = [
+  'equal',
+  'not_equal',
+  ...RANGE_FIELD_OPERATORS,
+  'is_null',
+  'is_not_null',
+];
 
 export const LIST_VALUE_OPERATORS = ['select_equals', 'select_not_equals'];
 
 export const NULL_CHECK_OPERATORS = ['is_null', 'is_not_null'];
-
-export const MISC_FIELDS = ['owner.displayName', 'tags.tagFQN'];
 
 export const OWNER_QUICK_FILTER_DEFAULT_OPTIONS_KEY = 'displayName.keyword';
 
@@ -358,3 +434,5 @@ export const CURATED_ASSETS_LIST = [
   EntityType.TABLE,
   EntityType.TOPIC,
 ];
+
+export const CP_TYPE_WITHOUT_KEYWORD_FIELD = ['number', 'integer', 'timestamp'];

@@ -15,7 +15,7 @@ package org.openmetadata.service;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.dropwizard.core.Configuration;
-import io.federecio.dropwizard.swagger.SwaggerBundleConfiguration;
+import io.dropwizard.core.server.DefaultServerFactory;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotNull;
 import java.util.Map;
@@ -37,11 +37,14 @@ import org.openmetadata.schema.security.scim.ScimConfiguration;
 import org.openmetadata.schema.security.secrets.SecretsManagerConfiguration;
 import org.openmetadata.schema.service.configuration.elasticsearch.ElasticSearchConfiguration;
 import org.openmetadata.schema.utils.JsonUtils;
+import org.openmetadata.service.config.BulkOperationConfiguration;
 import org.openmetadata.service.config.OMWebConfiguration;
 import org.openmetadata.service.config.ObjectStorageConfiguration;
+import org.openmetadata.service.config.QoSConfiguration;
 import org.openmetadata.service.jdbi3.HikariCPDataSourceFactory;
 import org.openmetadata.service.migration.MigrationConfiguration;
 import org.openmetadata.service.monitoring.EventMonitorConfiguration;
+import org.openmetadata.service.swagger.SwaggerBundleConfiguration;
 
 @Getter
 @Setter
@@ -151,6 +154,9 @@ public class OpenMetadataApplicationConfig extends Configuration {
   @JsonProperty("aiPlatformConfiguration")
   private AiPlatformConfiguration aiPlatformConfiguration;
 
+  @JsonProperty("mcpConfiguration")
+  private org.openmetadata.schema.api.configuration.MCPConfiguration mcpConfiguration;
+
   @JsonProperty("rdf")
   private RdfConfiguration rdfConfiguration = new RdfConfiguration();
 
@@ -162,6 +168,34 @@ public class OpenMetadataApplicationConfig extends Configuration {
       cacheConfig = new org.openmetadata.service.cache.CacheConfig();
     }
     return cacheConfig;
+  }
+
+  @JsonProperty("bulkOperation")
+  @Valid
+  private BulkOperationConfiguration bulkOperationConfiguration;
+
+  public BulkOperationConfiguration getBulkOperationConfiguration() {
+    if (bulkOperationConfiguration == null) {
+      bulkOperationConfiguration = new BulkOperationConfiguration();
+    }
+    return bulkOperationConfiguration;
+  }
+
+  @JsonProperty("qos")
+  private QoSConfiguration qosConfiguration;
+
+  public QoSConfiguration getQosConfiguration() {
+    if (qosConfiguration == null) {
+      qosConfiguration = new QoSConfiguration();
+    }
+    return qosConfiguration;
+  }
+
+  public String getApiRootPath() {
+    if (!(getServerFactory() instanceof DefaultServerFactory serverFactory)) {
+      return "";
+    }
+    return serverFactory.getJerseyRootPath().map(path -> path.replaceFirst("\\*$", "")).orElse("");
   }
 
   @Override

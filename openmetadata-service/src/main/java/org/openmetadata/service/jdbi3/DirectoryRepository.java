@@ -34,6 +34,7 @@ import org.apache.commons.csv.CSVPrinter;
 import org.apache.commons.csv.CSVRecord;
 import org.apache.commons.lang3.tuple.Pair;
 import org.jdbi.v3.sqlobject.transaction.Transaction;
+import org.openmetadata.csv.CsvExportProgressCallback;
 import org.openmetadata.csv.EntityCsv;
 import org.openmetadata.schema.entity.data.Directory;
 import org.openmetadata.schema.entity.services.DriveService;
@@ -49,6 +50,7 @@ import org.openmetadata.service.Entity;
 import org.openmetadata.service.exception.EntityNotFoundException;
 import org.openmetadata.service.resources.drives.DirectoryResource;
 import org.openmetadata.service.util.EntityUtil;
+import org.openmetadata.service.util.EntityUtil.RelationIncludes;
 import org.openmetadata.service.util.FullyQualifiedName;
 
 @Slf4j
@@ -108,6 +110,19 @@ public class DirectoryRepository extends EntityRepository<Directory> {
   }
 
   @Override
+  public void storeEntities(List<Directory> directories) {
+    List<String> fqns = new ArrayList<>(directories.size());
+    List<String> jsons = new ArrayList<>(directories.size());
+
+    for (Directory directory : directories) {
+      fqns.add(directory.getFullyQualifiedName());
+      jsons.add(serializeForStorage(directory));
+    }
+
+    dao.insertMany(dao.getTableName(), dao.getNameHashColumn(), fqns, jsons);
+  }
+
+  @Override
   public void storeRelationships(Directory directory) {
     // Add relationship from service to directory
     addRelationship(
@@ -153,7 +168,8 @@ public class DirectoryRepository extends EntityRepository<Directory> {
   }
 
   @Override
-  public void setFields(Directory directory, EntityUtil.Fields fields) {
+  public void setFields(
+      Directory directory, EntityUtil.Fields fields, RelationIncludes relationIncludes) {
     directory.withService(getService(directory));
     directory.withParent(getParentDirectory(directory));
 
@@ -282,9 +298,21 @@ public class DirectoryRepository extends EntityRepository<Directory> {
   }
 
   @Override
+  public boolean supportsBulkImportVersioning() {
+    return false;
+  }
+
+  @Override
   public String exportToCsv(String name, String user, boolean recursive) throws IOException {
+    return exportToCsv(name, user, recursive, null);
+  }
+
+  @Override
+  public String exportToCsv(
+      String name, String user, boolean recursive, CsvExportProgressCallback callback)
+      throws IOException {
     Directory directory = getByName(null, name, EntityUtil.Fields.EMPTY_FIELDS);
-    return new DirectoryCsv(directory, user, recursive).exportCsv(List.of(directory));
+    return new DirectoryCsv(directory, user, recursive).exportCsv(List.of(directory), callback);
   }
 
   @Override
@@ -356,7 +384,16 @@ public class DirectoryRepository extends EntityRepository<Directory> {
                 .withFullyQualifiedName(directoryFqn);
 
         if (!nullOrEmpty(parentFqn)) {
-          EntityReference parentRef = getEntityReference(printer, csvRecord, 3, DIRECTORY);
+          // Use dependency resolution for parent directory lookup
+          EntityReference parentRef = null;
+          try {
+            Directory parentDirectory =
+                getEntityWithDependencyResolution(DIRECTORY, parentFqn, "*", Include.NON_DELETED);
+            parentRef = parentDirectory.getEntityReference();
+          } catch (EntityNotFoundException parentEx) {
+            // Fall back to regular lookup
+            parentRef = getEntityReference(printer, csvRecord, 3, DIRECTORY);
+          }
           newDirectory.withParent(parentRef);
         }
       }
@@ -440,23 +477,51 @@ public class DirectoryRepository extends EntityRepository<Directory> {
     @Transaction
     @Override
     public void entitySpecificUpdate(boolean consolidatingChanges) {
-      updateFromRelationship(
+      compareAndUpdate(
           "parent",
-          DIRECTORY,
-          original.getParent(),
-          updated.getParent(),
-          Relationship.CONTAINS,
-          DIRECTORY,
-          original.getId());
-      recordChange("directoryType", original.getDirectoryType(), updated.getDirectoryType());
-      recordChange("path", original.getPath(), updated.getPath());
-      recordChange("isShared", original.getIsShared(), updated.getIsShared());
-      recordChange("numberOfFiles", original.getNumberOfFiles(), updated.getNumberOfFiles());
-      recordChange(
+          () -> {
+            updateFromRelationship(
+                "parent",
+                DIRECTORY,
+                original.getParent(),
+                updated.getParent(),
+                Relationship.CONTAINS,
+                DIRECTORY,
+                original.getId());
+          });
+      compareAndUpdate(
+          "directoryType",
+          () -> {
+            recordChange("directoryType", original.getDirectoryType(), updated.getDirectoryType());
+          });
+      compareAndUpdate(
+          "path",
+          () -> {
+            recordChange("path", original.getPath(), updated.getPath());
+          });
+      compareAndUpdate(
+          "isShared",
+          () -> {
+            recordChange("isShared", original.getIsShared(), updated.getIsShared());
+          });
+      compareAndUpdate(
+          "numberOfFiles",
+          () -> {
+            recordChange("numberOfFiles", original.getNumberOfFiles(), updated.getNumberOfFiles());
+          });
+      compareAndUpdate(
           "numberOfSubDirectories",
-          original.getNumberOfSubDirectories(),
-          updated.getNumberOfSubDirectories());
-      recordChange("totalSize", original.getTotalSize(), updated.getTotalSize());
+          () -> {
+            recordChange(
+                "numberOfSubDirectories",
+                original.getNumberOfSubDirectories(),
+                updated.getNumberOfSubDirectories());
+          });
+      compareAndUpdate(
+          "totalSize",
+          () -> {
+            recordChange("totalSize", original.getTotalSize(), updated.getTotalSize());
+          });
     }
   }
 }

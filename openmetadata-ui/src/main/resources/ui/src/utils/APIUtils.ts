@@ -44,6 +44,7 @@ export const formatTeamsResponse = (
     return {
       name: d._source.name,
       displayName: d._source.displayName,
+      fullyQualifiedName: d._source.fullyQualifiedName,
       type: d._source.entityType,
       id: d._source.id,
       isJoinable: d._source.isJoinable,
@@ -96,8 +97,7 @@ export const omitDeep = <T>(
   obj: T,
   predicate: (value: string, key: string | number | symbol) => boolean
 ): T => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return transform(obj as any, function (result, value, key) {
+  return transform(obj as object, function (result, value, key) {
     if (isObject(value)) {
       value = omitDeep(value, predicate) as unknown as string;
     }
@@ -106,8 +106,7 @@ export const omitDeep = <T>(
       if (isArray(obj) && isArray(result)) {
         result.push(value);
       } else {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (result as any)[key] = value;
+        (result as Record<string | number | symbol, unknown>)[key] = value;
       }
     }
   });

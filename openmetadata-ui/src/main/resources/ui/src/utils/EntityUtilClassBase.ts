@@ -93,6 +93,7 @@ import {
   FormattedSearchServiceType,
   FormattedStorageServiceType,
 } from './EntityUtils.interface';
+import Fqn from './Fqn';
 import {
   getApplicationDetailsPath,
   getBotsPath,
@@ -117,7 +118,7 @@ import {
 import { ExtraTableDropdownOptions } from './TableUtils';
 import { getTestSuiteDetailsPath } from './TestSuiteUtils';
 
-type PatchAPIFunction = (id: string, patch: Operation[]) => Promise<any>;
+type PatchAPIFunction = (id: string, patch: Operation[]) => Promise<unknown>;
 
 class EntityUtilClassBase {
   serviceTypeLookupMap: Map<string, string>;
@@ -390,7 +391,7 @@ class EntityUtilClassBase {
       case EntityType.PERSONA:
         return getPersonaDetailsPath(fullyQualifiedName);
 
-      case SearchIndex.API_COLLECTION_INDEX:
+      case SearchIndex.API_COLLECTION:
       case EntityType.API_COLLECTION:
         return getEntityDetailsPath(
           EntityType.API_COLLECTION,
@@ -399,7 +400,7 @@ class EntityUtilClassBase {
           subTab
         );
 
-      case SearchIndex.API_ENDPOINT_INDEX:
+      case SearchIndex.API_ENDPOINT:
       case EntityType.API_ENDPOINT:
         return getEntityDetailsPath(
           EntityType.API_ENDPOINT,
@@ -407,7 +408,7 @@ class EntityUtilClassBase {
           tab,
           subTab
         );
-      case SearchIndex.METRIC_SEARCH_INDEX:
+      case SearchIndex.METRIC:
       case EntityType.METRIC:
         return getEntityDetailsPath(
           EntityType.METRIC,
@@ -599,9 +600,74 @@ class EntityUtilClassBase {
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   public getEntityFloatingButton(_: EntityType): FC | null {
     return null;
+  }
+
+  public getFqnParts(
+    fqn: string,
+    type?: string
+  ): { entityFqn: string; columnFqn?: string } {
+    if (!type) {
+      return { entityFqn: fqn, columnFqn: undefined };
+    }
+    const fqnParts = Fqn.split(fqn);
+    let entityFqn = fqn;
+    let columnFqn;
+
+    switch (type) {
+      case EntityType.TABLE:
+      case EntityType.STORED_PROCEDURE:
+        // Service.Database.Schema.Table
+        if (fqnParts.length > 4) {
+          entityFqn = Fqn.build(...fqnParts.slice(0, 4));
+          columnFqn = Fqn.build(...fqnParts.slice(4));
+        }
+
+        break;
+
+      case EntityType.API_ENDPOINT:
+      case EntityType.DATABASE_SCHEMA:
+        // Service.ApiCollection.Endpoint
+        if (fqnParts.length > 3) {
+          entityFqn = Fqn.build(...fqnParts.slice(0, 3));
+          columnFqn = Fqn.build(...fqnParts.slice(3));
+        }
+
+        break;
+
+      case EntityType.TOPIC:
+      case EntityType.SEARCH_INDEX:
+      case EntityType.METRIC:
+      case EntityType.WORKSHEET:
+      case EntityType.PIPELINE:
+      case EntityType.DASHBOARD:
+      case EntityType.MLMODEL:
+      case EntityType.CHART:
+      case EntityType.DATABASE:
+        // Service.Topic
+        if (fqnParts.length > 2) {
+          entityFqn = Fqn.build(...fqnParts.slice(0, 2));
+          columnFqn = Fqn.build(...fqnParts.slice(2));
+        }
+
+        break;
+
+      case EntityType.DASHBOARD_DATA_MODEL:
+        // Service.Dashboard.DataModel
+        if (fqnParts.length > 3) {
+          entityFqn = Fqn.build(...fqnParts.slice(0, 3));
+          columnFqn = Fqn.build(...fqnParts.slice(3));
+        }
+
+        break;
+
+      default:
+        // Default behavior if needed, or just return as is
+        break;
+    }
+
+    return { entityFqn, columnFqn };
   }
 
   public getManageExtraOptions(
@@ -685,8 +751,7 @@ class EntityUtilClassBase {
     );
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  public shouldShowEntityStatus(entityType: string): boolean {
+  public shouldShowEntityStatus(_entityType: string): boolean {
     return false;
   }
 }

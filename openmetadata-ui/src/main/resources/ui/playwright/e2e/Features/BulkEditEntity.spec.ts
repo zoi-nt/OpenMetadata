@@ -44,6 +44,7 @@ import {
   validateImportStatus,
 } from '../../utils/importUtils';
 import { visitServiceDetailsPage } from '../../utils/service';
+import { waitForAllLoadersToDisappear } from '../../utils/entity';
 
 // use the admin user to login
 test.use({
@@ -79,6 +80,7 @@ const columnDetails1 = {
 
 test.describe('Bulk Edit Entity', () => {
   test.beforeAll('setup pre-test', async ({ browser }) => {
+    test.slow();
     const { apiContext, afterAction } = await createNewPage(browser);
 
     await user1.create(apiContext);
@@ -128,9 +130,7 @@ test.describe('Bulk Edit Entity', () => {
       );
       await page.click('[data-testid="bulk-edit-table"]');
 
-      await page.waitForSelector('[data-testid="loader"]', {
-        state: 'detached',
-      });
+      await waitForAllLoadersToDisappear(page);
 
       // Adding some assertion to make sure that CSV loaded correctly
       await expect(page.locator('.rdg-header-row')).toBeVisible();
@@ -139,8 +139,11 @@ test.describe('Bulk Edit Entity', () => {
         page.getByRole('button', { name: 'Previous' })
       ).not.toBeVisible();
 
-      // Adding manual wait for the file to load
-      await page.waitForTimeout(500);
+      // Wait for grid cells to be ready for interaction
+      await page
+        .locator('.rdg-cell[role="gridcell"]')
+        .first()
+        .waitFor({ state: 'visible' });
 
       // Click on first cell and edit
 
@@ -157,7 +160,9 @@ test.describe('Bulk Edit Entity', () => {
           sourceUrl: undefined,
         },
         page,
-        customPropertyRecord
+        customPropertyRecord,
+        undefined,
+        true
       );
 
       await page.getByRole('button', { name: 'Next' }).click();
@@ -182,8 +187,6 @@ test.describe('Bulk Edit Entity', () => {
       await toastNotification(page, /details updated successfully/);
 
       await page.click('[data-testid="databases"]');
-
-      await page.waitForLoadState('networkidle');
 
       // Verify Details updated
       await expect(page.getByTestId('column-name')).toHaveText(
@@ -262,9 +265,7 @@ test.describe('Bulk Edit Entity', () => {
 
       await page.click('[data-testid="bulk-edit-table"]');
 
-      await page.waitForSelector('[data-testid="loader"]', {
-        state: 'detached',
-      });
+      await waitForAllLoadersToDisappear(page);
 
       // Adding some assertion to make sure that CSV loaded correctly
       await expect(page.locator('.rdg-header-row')).toBeVisible();
@@ -273,8 +274,11 @@ test.describe('Bulk Edit Entity', () => {
         page.getByRole('button', { name: 'Previous' })
       ).not.toBeVisible();
 
-      // Adding manual wait for the file to load
-      await page.waitForTimeout(500);
+      // Wait for grid cells to be ready for interaction
+      await page
+        .locator('.rdg-cell[role="gridcell"]')
+        .first()
+        .waitFor({ state: 'visible' });
 
       // click on last row first cell
       await page.click('.rdg-cell[role="gridcell"]');
@@ -291,7 +295,9 @@ test.describe('Bulk Edit Entity', () => {
           domains: domain1.responseData,
         },
         page,
-        customPropertyRecord
+        customPropertyRecord,
+        undefined,
+        true
       );
 
       await page.getByRole('button', { name: 'Next' }).click();
@@ -307,7 +313,7 @@ test.describe('Bulk Edit Entity', () => {
         failed: '0',
       });
 
-      await page.waitForSelector('.rdg-header-row', {
+      await page.locator('.rdg-header-row').waitFor({
         state: 'visible',
       });
       const updateButtonResponse = page.waitForResponse(
@@ -341,8 +347,7 @@ test.describe('Bulk Edit Entity', () => {
 
       await page.getByTestId('column-display-name').click();
 
-      await page.waitForLoadState('networkidle');
-      await page.waitForSelector('loader', { state: 'hidden' });
+      await page.locator('loader').waitFor({ state: 'hidden' });
 
       // Verify Tags
       await expect(
@@ -415,8 +420,11 @@ test.describe('Bulk Edit Entity', () => {
         page.getByRole('button', { name: 'Previous' })
       ).not.toBeVisible();
 
-      // Adding manual wait for the file to load
-      await page.waitForTimeout(500);
+      // Wait for grid cells to be ready for interaction
+      await page
+        .locator('.rdg-cell[role="gridcell"]')
+        .first()
+        .waitFor({ state: 'visible' });
 
       // Click on first cell and edit
       await page.click('.rdg-cell[role="gridcell"]');
@@ -431,7 +439,9 @@ test.describe('Bulk Edit Entity', () => {
           domains: domain1.responseData,
         },
         page,
-        customPropertyRecord
+        customPropertyRecord,
+        undefined,
+        true
       );
 
       await page.getByRole('button', { name: 'Next' }).click();
@@ -464,8 +474,7 @@ test.describe('Bulk Edit Entity', () => {
         .getByTestId('column-display-name')
         .getByTestId(table.entity.name)
         .click();
-      await page.waitForLoadState('networkidle');
-      await page.waitForSelector('loader', { state: 'hidden' });
+      await page.locator('loader').waitFor({ state: 'hidden' });
 
       // Verify Domain
       await expect(page.getByTestId('domain-link')).toContainText(
@@ -525,8 +534,11 @@ test.describe('Bulk Edit Entity', () => {
         page.getByRole('button', { name: 'Previous' })
       ).not.toBeVisible();
 
-      // Adding manual wait for the file to load
-      await page.waitForTimeout(500);
+      // Wait for grid cells to be ready for interaction
+      await page
+        .locator('.rdg-cell[role="gridcell"]')
+        .first()
+        .waitFor({ state: 'visible' });
 
       // click on row first cell
       await page.click('.rdg-cell[role="gridcell"]');
@@ -552,24 +564,27 @@ test.describe('Bulk Edit Entity', () => {
         .locator(RDG_ACTIVE_CELL_SELECTOR)
         .press('ArrowDown', { delay: 100 });
 
+      // eslint-disable-next-line playwright/no-force-option -- button obscured by data grid overlay
       await page.click('[type="button"] >> text="Next"', { force: true });
-
+      // total column count +1 for header row
+      const count = `${tableEntity.entityLinkColumnsName.length + 1}`;
       await validateImportStatus(page, {
-        passed: '9',
-        processed: '9',
+        passed: count,
+        processed: count,
         failed: '0',
       });
 
       const updateButtonResponse = page.waitForResponse(
         `/api/v1/tables/name/*/importAsync?*dryRun=false&recursive=false*`
       );
+      // eslint-disable-next-line playwright/no-force-option -- button obscured by data grid overlay
       await page.click('[type="button"] >> text="Update"', { force: true });
       await page
         .locator('.inovua-react-toolkit-load-mask__background-layer')
         .waitFor({ state: 'detached' });
 
       await updateButtonResponse;
-      await page.waitForSelector('.message-banner-wrapper', {
+      await page.locator('.message-banner-wrapper').waitFor({
         state: 'detached',
       });
       await toastNotification(page, /details updated successfully/);
@@ -600,6 +615,8 @@ test.describe('Bulk Edit Entity', () => {
   test('Glossary', async ({ page }) => {
     test.slow();
 
+    let customPropertyRecord: Record<string, string> = {};
+
     const additionalGlossaryTerm = createGlossaryTermRowDetails();
     const glossary = new Glossary();
     const glossaryTerm = new GlossaryTerm(glossary);
@@ -608,10 +625,19 @@ test.describe('Bulk Edit Entity', () => {
     await glossary.create(apiContext);
     await glossaryTerm.create(apiContext);
 
+    await test.step('create custom properties for extension edit', async () => {
+      customPropertyRecord = await createCustomPropertiesForEntity(
+        page,
+        GlobalSettingOptions.GLOSSARY_TERM
+      );
+    });
+
     await test.step('Perform bulk edit action', async () => {
       await glossary.visitEntityPage(page);
 
       await page.click('[data-testid="bulk-edit-table"]');
+
+      await waitForAllLoadersToDisappear(page);
 
       // Adding some assertion to make sure that CSV loaded correctly
       await expect(page.locator('.rdg-header-row')).toBeVisible();
@@ -619,9 +645,6 @@ test.describe('Bulk Edit Entity', () => {
       await expect(
         page.getByRole('button', { name: 'Previous' })
       ).not.toBeVisible();
-
-      // Adding manual wait for the file to load
-      await page.waitForTimeout(500);
 
       // Click on first cell and edit
       await page.click('.rdg-cell[role="gridcell"]');
@@ -638,7 +661,9 @@ test.describe('Bulk Edit Entity', () => {
             name: glossaryTerm.data.name,
           },
         },
-        page
+        page,
+        customPropertyRecord,
+        true
       );
 
       await page.getByRole('button', { name: 'Next' }).click();
@@ -654,7 +679,7 @@ test.describe('Bulk Edit Entity', () => {
         failed: '0',
       });
 
-      await page.waitForSelector('.rdg-header-row', {
+      await page.locator('.rdg-header-row').waitFor({
         state: 'visible',
       });
 
@@ -667,13 +692,11 @@ test.describe('Bulk Edit Entity', () => {
         .locator('.inovua-react-toolkit-load-mask__background-layer')
         .waitFor({ state: 'detached' });
 
-      await page.waitForSelector('[data-testid="loader"]', {
-        state: 'detached',
-      });
+      await waitForAllLoadersToDisappear(page);
 
       await toastNotification(
         page,
-        `Glossaryterm ${glossary.responseData.fullyQualifiedName} details updated successfully`
+        `Glossary ${glossary.responseData.fullyQualifiedName} details updated successfully`
       );
 
       await selectActiveGlossaryTerm(page, additionalGlossaryTerm.displayName);
@@ -701,6 +724,142 @@ test.describe('Bulk Edit Entity', () => {
       await expect(
         page.getByTestId(user2.responseData?.['displayName'])
       ).toBeVisible();
+
+      // Verify Custom Properties
+      await page.click('[data-testid="custom_properties"]');
+      await waitForAllLoadersToDisappear(page);
+
+      for (const propertyName of Object.values(customPropertyRecord)) {
+        await expect(page.getByText(propertyName)).toBeVisible();
+      }
+    });
+
+    await glossary.delete(apiContext);
+    await afterAction();
+  });
+
+  test('Glossary Term (Nested)', async ({ page }) => {
+    test.slow();
+
+    let customPropertyRecord: Record<string, string> = {};
+
+    const additionalNestedGlossaryTerm = createGlossaryTermRowDetails();
+    const glossary = new Glossary();
+    const parentGlossaryTerm = new GlossaryTerm(glossary);
+    // Create a nested glossary term under the parent term
+    const nestedGlossaryTerm = new GlossaryTerm(glossary);
+
+    const { apiContext, afterAction } = await getApiContext(page);
+    await glossary.create(apiContext);
+    await parentGlossaryTerm.create(apiContext);
+
+    // Set the parent for the nested term
+    nestedGlossaryTerm.data.parent =
+      parentGlossaryTerm.responseData.fullyQualifiedName;
+    nestedGlossaryTerm.data.fullyQualifiedName = `${parentGlossaryTerm.responseData.fullyQualifiedName}."${nestedGlossaryTerm.data.name}"`;
+    await nestedGlossaryTerm.create(apiContext);
+
+    await test.step('create custom properties for extension edit', async () => {
+      customPropertyRecord = await createCustomPropertiesForEntity(
+        page,
+        GlobalSettingOptions.GLOSSARY_TERM
+      );
+    });
+
+    await test.step('Perform bulk edit action on nested glossary term', async () => {
+      // Navigate to the parent glossary term page
+      await parentGlossaryTerm.visitPage(page);
+
+      // Visit the glossary terms tab
+      await page.click('[data-testid="terms"]');
+
+      // Click on bulk edit button for the glossary term
+      await page.click('[data-testid="bulk-edit-table"]');
+
+      await waitForAllLoadersToDisappear(page);
+
+      // Adding some assertion to make sure that CSV loaded correctly
+      await expect(page.locator('.rdg-header-row')).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Next' })).toBeVisible();
+      await expect(
+        page.getByRole('button', { name: 'Previous' })
+      ).not.toBeVisible();
+
+      // Click on first cell and edit
+      await page.locator('.rdg-cell[role="gridcell"]').first().click();
+
+      // Click on first cell and edit the nested glossary term
+      await fillGlossaryRowDetails(
+        {
+          ...additionalNestedGlossaryTerm,
+          name: nestedGlossaryTerm.data.name,
+          owners: [user1.responseData?.['displayName']],
+          reviewers: [user2.responseData?.['displayName']],
+          relatedTerm: {
+            parent: glossary.data.name,
+            name: parentGlossaryTerm.data.name,
+          },
+        },
+        page,
+        customPropertyRecord,
+        true
+      );
+
+      await page.getByRole('button', { name: 'Next' }).click();
+      const loader = page.locator(
+        '.inovua-react-toolkit-load-mask__background-layer'
+      );
+
+      await loader.waitFor({ state: 'hidden' });
+
+      await validateImportStatus(page, {
+        passed: '2',
+        processed: '2',
+        failed: '0',
+      });
+
+      await page.locator('.rdg-header-row').waitFor({
+        state: 'visible',
+      });
+
+      const rowStatus = ['Entity updated'];
+
+      await expect(page.locator('.rdg-cell-details')).toHaveText(rowStatus);
+
+      const updateButtonResponse = page.waitForResponse(
+        `/api/v1/glossaryTerms/name/*/importAsync?*dryRun=false*`
+      );
+
+      await page.getByRole('button', { name: 'Update' }).click();
+      await page
+        .locator('.inovua-react-toolkit-load-mask__background-layer')
+        .waitFor({ state: 'detached' });
+
+      await updateButtonResponse;
+
+      await waitForAllLoadersToDisappear(page);
+
+      await toastNotification(page, /details updated successfully/);
+
+      // Visit the glossary terms tab
+      await page.click('[data-testid="terms"]');
+
+      await waitForAllLoadersToDisappear(page);
+
+      // Navigate to the nested glossary term to verify custom properties
+      await page.click(
+        `[data-testid="${additionalNestedGlossaryTerm.displayName}"]`
+      );
+
+      await waitForAllLoadersToDisappear(page);
+
+      // Verify Custom Properties
+      await page.click('[data-testid="custom_properties"]');
+      await waitForAllLoadersToDisappear(page);
+
+      for (const propertyName of Object.values(customPropertyRecord)) {
+        await expect(page.getByText(propertyName)).toBeVisible();
+      }
     });
 
     await glossary.delete(apiContext);

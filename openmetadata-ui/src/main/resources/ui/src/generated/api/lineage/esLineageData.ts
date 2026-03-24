@@ -1,5 +1,5 @@
 /*
- *  Copyright 2025 Collate.
+ *  Copyright 2026 Collate.
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
  *  You may obtain a copy of the License at
@@ -64,6 +64,11 @@ export interface EsLineageData {
      */
     sqlQuery?: string;
     /**
+     * Lineage path through temporary/intermediate tables. Each element represents a hop with
+     * fromEntity and toEntity fields.
+     */
+    tempLineageTables?: TempLineageTable[];
+    /**
      * To Entity.
      */
     toEntity?: RelationshipRef;
@@ -121,5 +126,20 @@ export interface RelationshipRef {
      * Type of the entity.
      */
     type?: string;
+    [property: string]: any;
+}
+
+/**
+ * A single hop in a temporary table lineage path.
+ */
+export interface TempLineageTable {
+    /**
+     * Source entity or table name for this hop.
+     */
+    fromEntity: string;
+    /**
+     * Target entity or table name for this hop.
+     */
+    toEntity: string;
     [property: string]: any;
 }

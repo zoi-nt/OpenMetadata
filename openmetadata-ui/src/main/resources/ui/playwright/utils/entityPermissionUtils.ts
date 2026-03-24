@@ -15,6 +15,7 @@ import { expect, Page } from '@playwright/test';
 import { ContainerClass } from '../support/entity/ContainerClass';
 import { DashboardClass } from '../support/entity/DashboardClass';
 import { DashboardDataModelClass } from '../support/entity/DashboardDataModelClass';
+import { DatabaseClass } from '../support/entity/DatabaseClass';
 import { DirectoryClass } from '../support/entity/DirectoryClass';
 import { EntityClass } from '../support/entity/EntityClass';
 import { FileClass } from '../support/entity/FileClass';
@@ -22,6 +23,8 @@ import { MetricClass } from '../support/entity/MetricClass';
 import { MlModelClass } from '../support/entity/MlModelClass';
 import { PipelineClass } from '../support/entity/PipelineClass';
 import { SearchIndexClass } from '../support/entity/SearchIndexClass';
+import { DashboardServiceClass } from '../support/entity/service/DashboardServiceClass';
+import { DatabaseServiceClass } from '../support/entity/service/DatabaseServiceClass';
 import { SpreadsheetClass } from '../support/entity/SpreadsheetClass';
 import { TableClass } from '../support/entity/TableClass';
 import { TopicClass } from '../support/entity/TopicClass';
@@ -29,6 +32,7 @@ import { WorksheetClass } from '../support/entity/WorksheetClass';
 import { UserClass } from '../support/user/UserClass';
 import { redirectToHomePage } from './common';
 import { addCustomPropertiesForEntity } from './customProperty';
+import { waitForAllLoadersToDisappear } from './entity';
 import { settingClick, SettingOptionsType } from './sidebar';
 
 // All operations across all entities
@@ -386,9 +390,7 @@ export const testPipelineSpecificOperations = async (
 
   // Test Edit Lineage for Pipeline
   await testUserPage.getByRole('tab', { name: 'Lineage' }).click();
-  await testUserPage.waitForSelector('[data-testid="loader"]', {
-    state: 'detached',
-  });
+  await waitForAllLoadersToDisappear(testUserPage);
 
   if (effect === 'allow') {
     await expect(testUserPage.getByTestId('edit-lineage')).toBeVisible();
@@ -431,6 +433,27 @@ export const testStoredProcedureSpecificOperations = async (
   );
 };
 
+export const testDatabaseSpecificOperations = async (
+  testUserPage: Page,
+  entity: DatabaseClass,
+  effect: 'allow' | 'deny'
+) => {
+  await redirectToHomePage(testUserPage);
+  await entity.visitEntityPage(testUserPage);
+
+  await expect(
+    testUserPage.getByTestId('database-databaseSchemas')
+  ).toBeVisible();
+
+  await waitForAllLoadersToDisappear(testUserPage);
+
+  await checkElementVisibility(
+    testUserPage,
+    { testId: 'Usage', type: 'label' },
+    effect
+  );
+};
+
 export const testDashboardDataModelSpecificOperations = async (
   testUserPage: Page,
   entity: DashboardDataModelClass,
@@ -441,15 +464,21 @@ export const testDashboardDataModelSpecificOperations = async (
 
   // Test Edit Lineage for Dashboard Data Model
   await testUserPage.getByRole('tab', { name: 'Lineage' }).click();
-  await testUserPage.waitForSelector('[data-testid="loader"]', {
-    state: 'detached',
-  });
+  await waitForAllLoadersToDisappear(testUserPage);
 
   if (effect === 'allow') {
     await expect(testUserPage.getByTestId('edit-lineage')).toBeVisible();
   } else {
     await expect(testUserPage.getByTestId('edit-lineage')).not.toBeVisible();
   }
+};
+
+// Regression test for updateVote dropping usageSummary from the re-fetch.
+// Only called for the 'allow' effect: verifies Usage label is still visible
+// after a vote action triggers the re-fetch of entity details.
+const testVotePreservesUsage = async (testUserPage: Page) => {
+  await testUserPage.locator('[data-testid="up-vote-btn"]').click();
+  await expect(testUserPage.getByText('Usage').first()).toBeVisible();
 };
 
 export const testDashboardSpecificOperations = async (
@@ -468,6 +497,10 @@ export const testDashboardSpecificOperations = async (
     },
     effect
   );
+
+  if (effect === 'allow') {
+    await testVotePreservesUsage(testUserPage);
+  }
 };
 
 export const testMlModelSpecificOperations = async (
@@ -486,6 +519,10 @@ export const testMlModelSpecificOperations = async (
     },
     effect
   );
+
+  if (effect === 'allow') {
+    await testVotePreservesUsage(testUserPage);
+  }
 };
 
 // Helper function to run common permission tests
@@ -558,6 +595,67 @@ export const entityConfig = {
   Worksheet: {
     class: WorksheetClass,
   },
+  Database: {
+    class: DatabaseClass,
+    specificTest: testDatabaseSpecificOperations,
+  },
+} as const;
+
+export const testDatabaseServiceSpecificOperations = async (
+  testUserPage: Page,
+  entity: DatabaseServiceClass,
+  _effect: 'allow' | 'deny'
+) => {
+  const databasesResponsePromise = testUserPage.waitForResponse(
+    (response) =>
+      response.url().includes('/api/v1/databases') &&
+      response.request().method() === 'GET'
+  );
+
+  await redirectToHomePage(testUserPage);
+  await entity.visitEntityPage(testUserPage);
+
+  const databasesResponse = await databasesResponsePromise;
+
+  expect(databasesResponse.status()).toBe(200);
+
+  await expect(
+    testUserPage.locator('[data-testid="service-children-table"]')
+  ).toBeVisible();
+};
+
+export const testDashboardServiceSpecificOperations = async (
+  testUserPage: Page,
+  entity: DashboardServiceClass,
+  _effect: 'allow' | 'deny'
+) => {
+  const dashboardsResponsePromise = testUserPage.waitForResponse(
+    (response) =>
+      response.url().includes('/api/v1/dashboards') &&
+      response.request().method() === 'GET'
+  );
+
+  await redirectToHomePage(testUserPage);
+  await entity.visitEntityPage(testUserPage);
+
+  const dashboardsResponse = await dashboardsResponsePromise;
+
+  expect(dashboardsResponse.status()).toBe(200);
+
+  await expect(
+    testUserPage.locator('[data-testid="service-children-table"]')
+  ).toBeVisible();
+};
+
+export const serviceEntityConfig = {
+  'Database Service': {
+    class: DatabaseServiceClass,
+    specificTest: testDatabaseServiceSpecificOperations,
+  },
+  'Dashboard Service': {
+    class: DashboardServiceClass,
+    specificTest: testDashboardServiceSpecificOperations,
+  },
 } as const;
 
 // Function to create custom properties for different entity types
@@ -583,6 +681,7 @@ export const createCustomPropertyForEntity = async (
     Metric: 'metrics',
     Database: 'databases',
     DatabaseSchema: 'databaseSchemas',
+    'Database Schema': 'databaseSchemas',
     StoredProcedure: 'storedProcedures',
     GlossaryTerm: 'glossaryTerm',
     Domain: 'domains',

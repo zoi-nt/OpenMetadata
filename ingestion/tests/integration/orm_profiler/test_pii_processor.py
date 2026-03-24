@@ -255,7 +255,7 @@ class PiiProcessorTest(TestCase):
         """
 
         record = SamplerResponse(
-            table=self.table_entity,
+            entity=self.table_entity,
             sample_data=SampleData(data=table_data),
         )
 
@@ -266,6 +266,6 @@ class PiiProcessorTest(TestCase):
             self.assertRegex(
                 updated.tag_label.reason,
                 expected_regex=re.compile(
-                    f"Chose {expected.tag_label.tagFQN.root} with a classification score of \d+([.,]?\d{{1,2}})?"
+                    f"Detected by `[A-Za-z]+Recognizer` \d+ times? with an average score of \d+([.,]?\d{{1,2}})?"
                 ),
             )

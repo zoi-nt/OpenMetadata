@@ -34,6 +34,7 @@ import org.apache.commons.csv.CSVPrinter;
 import org.apache.commons.csv.CSVRecord;
 import org.apache.commons.lang3.tuple.Pair;
 import org.jdbi.v3.sqlobject.transaction.Transaction;
+import org.openmetadata.csv.CsvExportProgressCallback;
 import org.openmetadata.csv.EntityCsv;
 import org.openmetadata.schema.api.data.CreateSpreadsheet;
 import org.openmetadata.schema.entity.data.Directory;
@@ -51,6 +52,7 @@ import org.openmetadata.service.Entity;
 import org.openmetadata.service.exception.EntityNotFoundException;
 import org.openmetadata.service.resources.drives.SpreadsheetResource;
 import org.openmetadata.service.util.EntityUtil;
+import org.openmetadata.service.util.EntityUtil.RelationIncludes;
 import org.openmetadata.service.util.FullyQualifiedName;
 
 @Slf4j
@@ -114,6 +116,19 @@ public class SpreadsheetRepository extends EntityRepository<Spreadsheet> {
   }
 
   @Override
+  public void storeEntities(List<Spreadsheet> spreadsheets) {
+    List<String> fqns = new ArrayList<>(spreadsheets.size());
+    List<String> jsons = new ArrayList<>(spreadsheets.size());
+
+    for (Spreadsheet spreadsheet : spreadsheets) {
+      fqns.add(spreadsheet.getFullyQualifiedName());
+      jsons.add(serializeForStorage(spreadsheet));
+    }
+
+    dao.insertMany(dao.getTableName(), dao.getNameHashColumn(), fqns, jsons);
+  }
+
+  @Override
   public void storeRelationships(Spreadsheet spreadsheet) {
     // Add relationship from service to spreadsheet
     addRelationship(
@@ -163,7 +178,8 @@ public class SpreadsheetRepository extends EntityRepository<Spreadsheet> {
   }
 
   @Override
-  public void setFields(Spreadsheet spreadsheet, EntityUtil.Fields fields) {
+  public void setFields(
+      Spreadsheet spreadsheet, EntityUtil.Fields fields, RelationIncludes relationIncludes) {
     spreadsheet.withService(getContainer(spreadsheet.getId()));
     spreadsheet.withDirectory(getDirectory(spreadsheet));
     if (fields.contains("worksheets")) {
@@ -230,8 +246,16 @@ public class SpreadsheetRepository extends EntityRepository<Spreadsheet> {
 
   @Override
   public String exportToCsv(String name, String user, boolean recursive) throws IOException {
+    return exportToCsv(name, user, recursive, null);
+  }
+
+  @Override
+  public String exportToCsv(
+      String name, String user, boolean recursive, CsvExportProgressCallback callback)
+      throws IOException {
     Spreadsheet spreadsheet = getByName(null, name, EntityUtil.Fields.EMPTY_FIELDS);
-    return new SpreadsheetCsv(spreadsheet, user, recursive).exportCsv(listOf(spreadsheet));
+    return new SpreadsheetCsv(spreadsheet, user, recursive)
+        .exportCsv(listOf(spreadsheet), callback);
   }
 
   @Override
@@ -424,13 +448,41 @@ public class SpreadsheetRepository extends EntityRepository<Spreadsheet> {
     @Transaction
     @Override
     public void entitySpecificUpdate(boolean consolidatingChanges) {
-      recordChange("mimeType", original.getMimeType(), updated.getMimeType());
-      recordChange("createdTime", original.getCreatedTime(), updated.getCreatedTime());
-      recordChange("modifiedTime", original.getModifiedTime(), updated.getModifiedTime());
-      recordChange("path", original.getPath(), updated.getPath());
-      recordChange("driveFileId", original.getDriveFileId(), updated.getDriveFileId());
-      recordChange("size", original.getSize(), updated.getSize());
-      recordChange("fileVersion", original.getFileVersion(), updated.getFileVersion());
+      compareAndUpdate(
+          "mimeType",
+          () -> {
+            recordChange("mimeType", original.getMimeType(), updated.getMimeType());
+          });
+      compareAndUpdate(
+          "createdTime",
+          () -> {
+            recordChange("createdTime", original.getCreatedTime(), updated.getCreatedTime());
+          });
+      compareAndUpdate(
+          "modifiedTime",
+          () -> {
+            recordChange("modifiedTime", original.getModifiedTime(), updated.getModifiedTime());
+          });
+      compareAndUpdate(
+          "path",
+          () -> {
+            recordChange("path", original.getPath(), updated.getPath());
+          });
+      compareAndUpdate(
+          "driveFileId",
+          () -> {
+            recordChange("driveFileId", original.getDriveFileId(), updated.getDriveFileId());
+          });
+      compareAndUpdate(
+          "size",
+          () -> {
+            recordChange("size", original.getSize(), updated.getSize());
+          });
+      compareAndUpdate(
+          "fileVersion",
+          () -> {
+            recordChange("fileVersion", original.getFileVersion(), updated.getFileVersion());
+          });
     }
   }
 }

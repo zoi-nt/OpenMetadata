@@ -21,8 +21,11 @@ import static org.openmetadata.service.fernet.Fernet.encryptWebhookSecretKey;
 import static org.openmetadata.service.util.EntityUtil.objectMatch;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
 import lombok.extern.slf4j.Slf4j;
 import org.openmetadata.schema.api.events.CreateEventSubscription;
 import org.openmetadata.schema.entity.events.Argument;
@@ -43,12 +46,14 @@ import org.openmetadata.service.events.scheduled.EventSubscriptionScheduler;
 import org.openmetadata.service.events.subscription.AlertUtil;
 import org.openmetadata.service.resources.events.subscription.EventSubscriptionResource;
 import org.openmetadata.service.util.EntityUtil.Fields;
+import org.openmetadata.service.util.EntityUtil.RelationIncludes;
 
 @Slf4j
 public class EventSubscriptionRepository extends EntityRepository<EventSubscription> {
-  static final String ALERT_PATCH_FIELDS = "trigger,enabled,batchSize,notificationTemplate";
+  static final String ALERT_PATCH_FIELDS =
+      "trigger,enabled,batchSize,notificationTemplate,destinations";
   static final String ALERT_UPDATE_FIELDS =
-      "trigger,enabled,batchSize,input,filteringRules,notificationTemplate";
+      "trigger,enabled,batchSize,input,filteringRules,notificationTemplate,destinations";
 
   public EventSubscriptionRepository() {
     super(
@@ -61,7 +66,8 @@ public class EventSubscriptionRepository extends EntityRepository<EventSubscript
   }
 
   @Override
-  public void setFields(EventSubscription entity, Fields fields) {
+  public void setFields(
+      EventSubscription entity, Fields fields, RelationIncludes relationIncludes) {
     if (fields.contains("statusDetails") && !entity.getDestinations().isEmpty()) {
       List<SubscriptionDestination> destinations = new ArrayList<>();
       entity
@@ -151,6 +157,13 @@ public class EventSubscriptionRepository extends EntityRepository<EventSubscript
     }
   }
 
+  private void ensureDestinationIds(EventSubscription entity) {
+    // Ensure all destinations have unique IDs assigned before storage
+    Optional.ofNullable(entity.getDestinations()).orElse(Collections.emptyList()).stream()
+        .filter(destination -> nullOrEmpty(destination.getId()))
+        .forEach(destination -> destination.withId(UUID.randomUUID()));
+  }
+
   public EventSubscriptionOffset syncEventSubscriptionOffset(String eventSubscriptionName) {
     EventSubscription eventSubscription = getByName(null, eventSubscriptionName, getFields("*"));
     long latestOffset = daoCollection.changeEventDAO().getLatestOffset();
@@ -176,7 +189,29 @@ public class EventSubscriptionRepository extends EntityRepository<EventSubscript
 
   @Override
   public void storeEntity(EventSubscription entity, boolean update) {
+    // Ensure all destinations have unique IDs before storage (handles all operations: POST, PUT,
+    // PATCH)
+    ensureDestinationIds(entity);
     store(entity, update);
+  }
+
+  @Override
+  public void storeEntities(List<EventSubscription> entities) {
+    List<String> fqns = new ArrayList<>(entities.size());
+    List<String> jsons = new ArrayList<>(entities.size());
+    for (EventSubscription entity : entities) {
+      ensureDestinationIds(entity);
+      fqns.add(entity.getFullyQualifiedName());
+      jsons.add(serializeForStorage(entity));
+    }
+    dao.insertMany(dao.getTableName(), dao.getNameHashColumn(), fqns, jsons);
+  }
+
+  @Override
+  protected void clearEntitySpecificRelationshipsForMany(List<EventSubscription> entities) {
+    if (entities.isEmpty()) return;
+    List<UUID> ids = entities.stream().map(EventSubscription::getId).toList();
+    deleteFromMany(ids, Entity.EVENT_SUBSCRIPTION, Relationship.USES, Entity.NOTIFICATION_TEMPLATE);
   }
 
   @Override
@@ -209,23 +244,58 @@ public class EventSubscriptionRepository extends EntityRepository<EventSubscript
 
     @Override
     public void entitySpecificUpdate(boolean consolidatingChanges) {
-      updateTemplateRelationship();
+      compareAndUpdate(
+          "notificationTemplate",
+          () -> {
+            updateTemplateRelationship();
+          });
 
-      recordChange("input", original.getInput(), updated.getInput(), true);
-      recordChange("batchSize", original.getBatchSize(), updated.getBatchSize());
+      compareAndUpdate(
+          "input",
+          () -> {
+            recordChange("input", original.getInput(), updated.getInput(), true);
+          });
+      compareAndUpdate(
+          "batchSize",
+          () -> {
+            recordChange("batchSize", original.getBatchSize(), updated.getBatchSize());
+          });
       if (!original.getAlertType().equals(CreateEventSubscription.AlertType.ACTIVITY_FEED)) {
-        recordChange(
-            "filteringRules", original.getFilteringRules(), updated.getFilteringRules(), true);
-        recordChange("enabled", original.getEnabled(), updated.getEnabled());
-        recordChange(
+        compareAndUpdate(
+            "filteringRules",
+            () -> {
+              recordChange(
+                  "filteringRules",
+                  original.getFilteringRules(),
+                  updated.getFilteringRules(),
+                  true);
+            });
+        compareAndUpdate(
+            "enabled",
+            () -> {
+              recordChange("enabled", original.getEnabled(), updated.getEnabled());
+            });
+        compareAndUpdate(
             "destinations",
-            original.getDestinations(),
-            encryptWebhookSecretKey(updated.getDestinations()),
-            true,
-            objectMatch,
-            false);
-        recordChange("trigger", original.getTrigger(), updated.getTrigger(), true);
-        recordChange("config", original.getConfig(), updated.getConfig(), true);
+            () -> {
+              recordChange(
+                  "destinations",
+                  original.getDestinations(),
+                  encryptWebhookSecretKey(updated.getDestinations()),
+                  true,
+                  objectMatch,
+                  false);
+            });
+        compareAndUpdate(
+            "trigger",
+            () -> {
+              recordChange("trigger", original.getTrigger(), updated.getTrigger(), true);
+            });
+        compareAndUpdate(
+            "config",
+            () -> {
+              recordChange("config", original.getConfig(), updated.getConfig(), true);
+            });
       }
     }
 

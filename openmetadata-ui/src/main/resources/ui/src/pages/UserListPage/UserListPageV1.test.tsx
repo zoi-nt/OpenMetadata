@@ -15,6 +15,7 @@ import { render, waitFor } from '@testing-library/react';
 import { act } from 'react-test-renderer';
 import { ROUTES } from '../../constants/constants';
 import { GlobalSettingOptions } from '../../constants/GlobalSettings.constants';
+import { SearchIndex } from '../../enums/search.enum';
 import { useTableFilters } from '../../hooks/useTableFilters';
 import { searchQuery } from '../../rest/searchAPI';
 import { getUsers } from '../../rest/userAPI';
@@ -218,7 +219,6 @@ describe('Test UserListPage component', () => {
 
     expect(mockSetFilters).toHaveBeenCalledWith({
       isDeleted: true,
-      user: null,
     });
     expect(deletedSwitch).toHaveAttribute('aria-checked', 'true');
   });
@@ -336,7 +336,7 @@ describe('Test UserListPage component', () => {
             },
           },
         },
-        searchIndex: 'user_search_index',
+        searchIndex: SearchIndex.USER,
         includeDeleted: false,
       });
     });
@@ -369,7 +369,7 @@ describe('Test UserListPage component', () => {
             },
           },
         },
-        searchIndex: 'user_search_index',
+        searchIndex: SearchIndex.USER,
         includeDeleted: false,
       });
     });
@@ -553,7 +553,6 @@ describe('Test UserListPage component', () => {
     await waitFor(() => {
       expect(mockSetFilters).toHaveBeenCalledWith({
         isDeleted: true,
-        user: null,
       });
     });
 

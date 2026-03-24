@@ -240,7 +240,14 @@ class MetadataUsageBulkSink(BulkSink):
             for usage_record in file_handler.readlines():
                 record = json.loads(usage_record)
                 cost_record = QueryCostWrapper(**record)
-                self.metadata.publish_query_cost(cost_record, self.service_name)
+                try:
+                    self.metadata.publish_query_cost(cost_record, self.service_name)
+                except Exception as exc:
+                    logger.debug(traceback.format_exc())
+                    logger.warning(
+                        f"Failed to publish query cost for "
+                        f"query={cost_record.query[:100]}...: {exc}"
+                    )
 
     # Check here how to properly pick up ES and/or table query data
     def run(self) -> None:
@@ -283,16 +290,21 @@ class MetadataUsageBulkSink(BulkSink):
                             table_entity=table_entity, table_usage=table_usage
                         )
                 except APIError as err:
-                    error = f"Failed to update query join for {table_usage}: {err}"
-                    logger.debug(traceback.format_exc())
-                    logger.warning(error)
-                    self.status.failed(
-                        StackTraceError(
-                            name=table_usage.table,
-                            error=error,
-                            stackTrace=traceback.format_exc(),
+                    if err.status_code == 409:
+                        logger.warning(
+                            f"Entity already exists for {table_usage.table}, skipping: {err}"
                         )
-                    )
+                    else:
+                        error = f"Failed to update query join for {table_usage}: {err}"
+                        logger.debug(traceback.format_exc())
+                        logger.warning(error)
+                        self.status.failed(
+                            StackTraceError(
+                                name=table_usage.table,
+                                error=error,
+                                stackTrace=traceback.format_exc(),
+                            )
+                        )
                 except Exception as exc:
                     name = table_entity.name.root
                     error = (

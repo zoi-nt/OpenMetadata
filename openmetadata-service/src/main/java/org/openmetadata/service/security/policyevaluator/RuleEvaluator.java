@@ -73,6 +73,21 @@ public class RuleEvaluator {
   }
 
   @Function(
+      name = "isReviewer",
+      input = "none",
+      description = "Returns true if the logged in user is a reviewer of the entity being accessed",
+      examples = {"isReviewer()", "!isReviewer"})
+  public boolean isReviewer() {
+    if (expressionValidation) {
+      return false;
+    }
+    if (subjectContext == null || resourceContext == null || resourceContext.getEntity() == null) {
+      return false;
+    }
+    return subjectContext.isReviewer(resourceContext.getEntity().getReviewers());
+  }
+
+  @Function(
       name = "hasDomain",
       input = "none",
       description =
@@ -137,21 +152,9 @@ public class RuleEvaluator {
       return false;
     }
 
-    for (EntityReference userDomain : userDomains) {
-      for (EntityReference resourceDomain : resourceDomains) {
-        if (userDomain.getId() != null && userDomain.getId().equals(resourceDomain.getId())) {
-          LOG.info(
-              "hasDomain() - Domain match found by ID: {}, returning true", userDomain.getId());
-          return true;
-        }
-        if (userDomain.getFullyQualifiedName() != null
-            && userDomain.getFullyQualifiedName().equals(resourceDomain.getFullyQualifiedName())) {
-          LOG.info(
-              "hasDomain() - Domain match found by FQN: {}, returning true",
-              userDomain.getFullyQualifiedName());
-          return true;
-        }
-      }
+    if (subjectContext.hasDomains(resourceDomains)) {
+      LOG.info("hasDomain() - Domain hierarchy match found, returning true");
+      return true;
     }
 
     LOG.info("hasDomain() - No matching domains found, returning false");

@@ -19,6 +19,7 @@ import static org.openmetadata.service.Entity.USER;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.UUID;
 import lombok.extern.slf4j.Slf4j;
 import org.jdbi.v3.sqlobject.transaction.Transaction;
 import org.openmetadata.schema.entity.teams.Persona;
@@ -29,6 +30,7 @@ import org.openmetadata.schema.utils.JsonUtils;
 import org.openmetadata.service.Entity;
 import org.openmetadata.service.resources.teams.PersonaResource;
 import org.openmetadata.service.util.EntityUtil.Fields;
+import org.openmetadata.service.util.EntityUtil.RelationIncludes;
 
 @Slf4j
 public class PersonaRepository extends EntityRepository<Persona> {
@@ -49,7 +51,7 @@ public class PersonaRepository extends EntityRepository<Persona> {
   }
 
   @Override
-  public void setFields(Persona persona, Fields fields) {
+  public void setFields(Persona persona, Fields fields, RelationIncludes relationIncludes) {
     persona.setUsers(fields.contains(FIELD_USERS) ? getUsers(persona) : persona.getUsers());
   }
 
@@ -67,16 +69,25 @@ public class PersonaRepository extends EntityRepository<Persona> {
   }
 
   @Override
+  protected List<String> getFieldsStrippedFromStorageJson() {
+    return List.of("users");
+  }
+
+  @Override
   public void storeEntity(Persona persona, boolean update) {
-    // Relationships and fields such as href are derived and not stored as part of json
-    List<EntityReference> users = persona.getUsers();
-    // Don't store users, defaultRoles, href as JSON. Build it on the fly based on relationships
-    persona.withUsers(null);
-
     store(persona, update);
+  }
 
-    // Restore the relationships
-    persona.withUsers(users);
+  @Override
+  public void storeEntities(List<Persona> entities) {
+    storeMany(entities);
+  }
+
+  @Override
+  protected void clearEntitySpecificRelationshipsForMany(List<Persona> entities) {
+    if (entities.isEmpty()) return;
+    List<UUID> ids = entities.stream().map(Persona::getId).toList();
+    deleteFromMany(ids, Entity.PERSONA, Relationship.APPLIED_TO, Entity.USER);
   }
 
   @Override
@@ -124,6 +135,12 @@ public class PersonaRepository extends EntityRepository<Persona> {
     for (EntityReference user : listOrEmpty(defaultUsers)) {
       deleteRelationship(user.getId(), USER, persona.getId(), PERSONA, Relationship.DEFAULTS_TO);
     }
+
+    // Remove all team default persona relationships (HAS)
+    List<EntityReference> teams = findFrom(persona.getId(), PERSONA, Relationship.HAS, Entity.TEAM);
+    for (EntityReference team : listOrEmpty(teams)) {
+      deleteRelationship(team.getId(), Entity.TEAM, persona.getId(), PERSONA, Relationship.HAS);
+    }
   }
 
   /** Handles entity updated from PUT and POST operation. */
@@ -134,8 +151,16 @@ public class PersonaRepository extends EntityRepository<Persona> {
 
     @Override
     public void entitySpecificUpdate(boolean consolidatingChanges) {
-      updateUsers(original, updated);
-      updateDefault(original, updated);
+      compareAndUpdate(
+          "users",
+          () -> {
+            updateUsers(original, updated);
+          });
+      compareAndUpdate(
+          "default",
+          () -> {
+            updateDefault(original, updated);
+          });
     }
 
     @Transaction

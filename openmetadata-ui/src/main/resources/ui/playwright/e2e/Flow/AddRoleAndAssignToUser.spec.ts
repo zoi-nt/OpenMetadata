@@ -14,7 +14,6 @@
 import test, { expect } from '@playwright/test';
 import { GlobalSettingOptions } from '../../constant/settings';
 import {
-  clickOutside,
   createNewPage,
   descriptionBox,
   generateRandomUsername,
@@ -24,7 +23,7 @@ import {
 import { settingClick } from '../../utils/sidebar';
 import { visitUserProfilePage } from '../../utils/user';
 
-const roleName = `Role-test-${uuid()}`;
+const roleName = `Add-Role-test-${uuid()}`;
 const user = generateRandomUsername();
 const userDisplayName = user.firstName + ' ' + user.lastName;
 const userName = user.email.split('@')[0].toLowerCase();
@@ -48,7 +47,6 @@ test.describe.serial('Add role and assign it to the user', () => {
 
   test('Create role', async ({ page }) => {
     await settingClick(page, GlobalSettingOptions.ROLES);
-    await page.waitForLoadState('networkidle');
 
     await page.click('[data-testid="add-role"]');
 
@@ -66,22 +64,20 @@ test.describe.serial('Add role and assign it to the user', () => {
 
     await page.waitForURL(`**/settings/access/roles/${roleName}`);
 
-    await page.waitForSelector('[data-testid="inactive-link"]');
+    await page.getByTestId('inactive-link').waitFor();
 
-    expect(await page.textContent('[data-testid="inactive-link"]')).toBe(
+    await expect(page.locator('[data-testid="inactive-link"]')).toHaveText(
       roleName
     );
-    expect(
-      await page.textContent(
+    await expect(
+      page.locator(
         '[data-testid="asset-description-container"] [data-testid="viewer-container"]'
       )
-    ).toContain(`description for ${roleName}`);
+    ).toContainText(`description for ${roleName}`);
   });
 
   test('Create new user and assign new role to him', async ({ page }) => {
     await settingClick(page, GlobalSettingOptions.USERS);
-
-    await page.waitForLoadState('networkidle');
 
     await page.click('[data-testid="add-user"]');
 
@@ -94,13 +90,18 @@ test.describe.serial('Add role and assign it to the user', () => {
     await page.click('[data-testid="password-generator"]');
     await generatePasswordResponse;
 
+    await expect(page.locator('#generatedPassword')).toHaveValue(/\S+/);
+
     await page.click('[data-testid="roles-dropdown"]');
+    await page.locator('.ant-select-dropdown').waitFor({
+      state: 'visible',
+    });
     await page.fill('#roles', roleName);
     await page.click(`[title="${roleName}"]`);
 
-    await clickOutside(page);
+    await page.keyboard.press('Escape');
 
-    await page.waitForSelector('[data-testid="save-user"]', {
+    await page.getByTestId('save-user').waitFor({
       state: 'visible',
     });
 
@@ -112,7 +113,7 @@ test.describe.serial('Add role and assign it to the user', () => {
   test('Verify assigned role to new user', async ({ page }) => {
     await visitUserProfilePage(page, userName);
 
-    await page.waitForSelector('[data-testid="user-profile"]');
+    await page.getByTestId('user-profile').waitFor();
 
     await expect(page.getByTestId('user-profile-roles')).toContainText(
       roleName

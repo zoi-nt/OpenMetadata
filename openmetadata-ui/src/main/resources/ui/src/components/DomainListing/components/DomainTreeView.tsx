@@ -11,9 +11,10 @@
  *  limitations under the License.
  */
 
-import AddIcon from '@mui/icons-material/Add';
 import { Box, Button, Chip, Typography, useTheme } from '@mui/material';
 import { SimpleTreeView, TreeItem, treeItemClasses } from '@mui/x-tree-view';
+import { Avatar } from '@openmetadata/ui-core-components';
+import { Plus } from '@untitledui/icons';
 import { AxiosError } from 'axios';
 import { compare, Operation as JsonPathOperation } from 'fast-json-patch';
 import { isEmpty } from 'lodash';
@@ -23,6 +24,7 @@ import { useNavigate } from 'react-router-dom';
 import { ReactComponent as ArrowCircleDown } from '../../../assets/svg/arrow-circle-down.svg';
 import { ReactComponent as FolderEmptyIcon } from '../../../assets/svg/folder-empty.svg';
 import { BORDER_COLOR } from '../../../constants/constants';
+import { LEARNING_PAGE_IDS } from '../../../constants/Learning.constants';
 import { usePermissionProvider } from '../../../context/PermissionProvider/PermissionProvider';
 import { ERROR_PLACEHOLDER_TYPE } from '../../../enums/common.enum';
 import { EntityTabs, TabSpecificField } from '../../../enums/entity.enum';
@@ -40,13 +42,13 @@ import {
 } from '../../../rest/domainAPI';
 import { convertDomainsToTreeOptions } from '../../../utils/DomainUtils';
 import { getEntityName } from '../../../utils/EntityUtils';
+import { getEntityAvatarProps } from '../../../utils/IconUtils';
 import {
   escapeESReservedCharacters,
   getDecodedFqn,
   getEncodedFqn,
 } from '../../../utils/StringsUtils';
 import { showErrorToast } from '../../../utils/ToastUtils';
-import { EntityAvatar } from '../../common/EntityAvatar/EntityAvatar';
 import ErrorPlaceHolder from '../../common/ErrorWithPlaceholder/ErrorPlaceHolder';
 import Loader from '../../common/Loader/Loader';
 import ResizableLeftPanels from '../../common/ResizablePanels/ResizableLeftPanels';
@@ -777,7 +779,7 @@ const DomainTreeView = ({
                   alignItems: 'center',
                   gap: 2,
                 }}>
-                <EntityAvatar entity={node} size={24} variant="rounded" />
+                <Avatar size="xs" {...getEntityAvatarProps(node)} />
                 <Typography
                   sx={{
                     color: theme.palette.allShades?.gray?.[800],
@@ -823,7 +825,7 @@ const DomainTreeView = ({
                   mb: 1.5,
                 }}>
                 <Button
-                  startIcon={isLoadingMore ? null : <AddIcon />}
+                  startIcon={isLoadingMore ? null : <Plus />}
                   sx={{
                     p: 0,
                     cursor: 'pointer',
@@ -1094,10 +1096,12 @@ const DomainTreeView = ({
 
   return (
     <ResizableLeftPanels
+      showLearningIcon
       firstPanel={{
         className: 'domain-tree-panel border-right border-gray-200',
         minWidth: 280,
         flex: 0.25,
+        title: t('label.domain-plural'),
         children: (
           <Box
             ref={scrollContainerRef}
@@ -1112,6 +1116,8 @@ const DomainTreeView = ({
           </Box>
         ),
       }}
+      learningPageId={LEARNING_PAGE_IDS.DOMAIN}
+      learningTitle={t('label.domain-plural')}
       secondPanel={{
         className: 'domain-details-panel',
         minWidth: 600,

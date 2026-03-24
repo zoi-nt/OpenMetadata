@@ -10,7 +10,12 @@
  *  See the License for the specific language governing permissions and
  *  limitations under the License.
  */
-import { Grid, Tooltip } from '@mui/material';
+import {
+  ButtonUtility,
+  Grid,
+  Tooltip,
+  TooltipTrigger,
+} from '@openmetadata/ui-core-components';
 import { Expand05, Home02, Minimize02 } from '@untitledui/icons';
 import { Card, Select } from 'antd';
 import { DefaultOptionType } from 'antd/lib/select';
@@ -30,7 +35,6 @@ import { LineageConfig } from '../../components/Entity/EntityLineage/EntityLinea
 import EntitySuggestionOption from '../../components/Entity/EntityLineage/EntitySuggestionOption/EntitySuggestionOption.component';
 import LineageConfigModal from '../../components/Entity/EntityLineage/LineageConfigModal';
 import Lineage from '../../components/Lineage/Lineage.component';
-import { StyledIconButton } from '../../components/LineageTable/LineageTable.styled';
 import PageHeader from '../../components/PageHeader/PageHeader.component';
 import PageLayoutV1 from '../../components/PageLayoutV1/PageLayoutV1';
 import { SourceType } from '../../components/SearchedData/SearchedData.interface';
@@ -42,6 +46,7 @@ import {
   ExportTypes,
   LINEAGE_EXPORT_SELECTOR,
 } from '../../constants/Export.constants';
+import { LEARNING_PAGE_IDS } from '../../constants/Learning.constants';
 import { PAGE_HEADERS } from '../../constants/PageHeaders.constant';
 import LineageProvider from '../../context/LineageProvider/LineageProvider';
 import { LineagePlatformView } from '../../context/LineageProvider/LineageProvider.interface';
@@ -68,7 +73,10 @@ import {
   getViewportForLineageExport,
 } from '../../utils/EntityLineageUtils';
 import { getOperationPermissions } from '../../utils/PermissionsUtils';
-import { getEncodedFqn } from '../../utils/StringsUtils';
+import {
+  escapeESReservedCharacters,
+  getEncodedFqn,
+} from '../../utils/StringsUtils';
 import { showErrorToast } from '../../utils/ToastUtils';
 import { useRequiredParams } from '../../utils/useRequiredParams';
 import './platform-lineage.less';
@@ -137,7 +145,7 @@ const PlatformLineage = () => {
         ];
 
         const response = await searchQuery({
-          query: value,
+          query: escapeESReservedCharacters(value),
           searchIndex: searchIndices,
           pageSize: PAGE_SIZE_BASE,
           queryFilter: getLineageEntityExclusionFilter(),
@@ -243,39 +251,43 @@ const PlatformLineage = () => {
         />
         <div className="d-flex gap-2">
           <Tooltip
-            arrow
             placement="top"
-            title={t('label.export-as-type', { type: t('label.png') })}>
-            <StyledIconButton size="large" onClick={handleExport}>
-              <DownloadIcon />
-            </StyledIconButton>
+            title={t('label.export-as-type', {
+              type: t('label.png-uppercase'),
+            })}>
+            <TooltipTrigger>
+              <ButtonUtility
+                data-testid="export-button"
+                icon={DownloadIcon}
+                onClick={handleExport}
+              />
+            </TooltipTrigger>
           </Tooltip>
-          <StyledIconButton
+          <ButtonUtility
             data-testid="lineage-config"
-            size="large"
-            onClick={handleSettingsClick}>
-            <SettingsOutlined />
-          </StyledIconButton>
+            icon={SettingsOutlined}
+            onClick={handleSettingsClick}
+          />
           <Tooltip
-            arrow
             placement="top"
             title={
               isFullScreen
                 ? t('label.exit-full-screen')
                 : t('label.full-screen-view')
             }>
-            <StyledIconButton
-              size="large"
-              onClick={() =>
-                navigate({
-                  search: QueryString.stringify({
-                    ...queryParams,
-                    [FULLSCREEN_QUERY_PARAM_KEY]: !isFullScreen,
-                  }),
-                })
-              }>
-              {isFullScreen ? <Minimize02 /> : <Expand05 />}
-            </StyledIconButton>
+            <TooltipTrigger>
+              <ButtonUtility
+                icon={isFullScreen ? Minimize02 : Expand05}
+                onClick={() =>
+                  navigate({
+                    search: QueryString.stringify({
+                      ...queryParams,
+                      [FULLSCREEN_QUERY_PARAM_KEY]: !isFullScreen,
+                    }),
+                  })
+                }
+              />
+            </TooltipTrigger>
           </Tooltip>
         </div>
       </div>
@@ -313,10 +325,10 @@ const PlatformLineage = () => {
 
   return (
     <PageLayoutV1 pageTitle={t('label.lineage')}>
-      <Grid container spacing={2}>
+      <Grid rowGap="2">
         {isFullScreen ? null : (
           <>
-            <Grid size={12}>
+            <Grid.Item span={24}>
               <TitleBreadcrumb
                 useCustomArrow
                 titleLinks={[
@@ -332,9 +344,9 @@ const PlatformLineage = () => {
                   },
                 ]}
               />
-            </Grid>
+            </Grid.Item>
 
-            <Grid size={12}>
+            <Grid.Item span={24}>
               <Card>
                 <PageHeader
                   data={{
@@ -343,14 +355,16 @@ const PlatformLineage = () => {
                     }),
                     subHeader: t(PAGE_HEADERS.PLATFORM_LINEAGE.subHeader),
                   }}
+                  learningPageId={LEARNING_PAGE_IDS.LINEAGE}
+                  title={t('label.lineage')}
                 />
               </Card>
-            </Grid>
+            </Grid.Item>
           </>
         )}
-        <Grid size={12}>
+        <Grid.Item span={24}>
           <div className="platform-lineage-container">{lineageElement}</div>
-        </Grid>
+        </Grid.Item>
       </Grid>
 
       <LineageConfigModal

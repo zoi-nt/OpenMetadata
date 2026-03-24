@@ -26,6 +26,9 @@ import static org.openmetadata.service.Entity.FIELD_TAGS;
 import static org.openmetadata.service.Entity.SPREADSHEET;
 import static org.openmetadata.service.Entity.WORKSHEET;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -40,6 +43,7 @@ import org.apache.commons.csv.CSVPrinter;
 import org.apache.commons.csv.CSVRecord;
 import org.apache.commons.lang3.tuple.Pair;
 import org.jdbi.v3.sqlobject.transaction.Transaction;
+import org.openmetadata.csv.CsvExportProgressCallback;
 import org.openmetadata.csv.EntityCsv;
 import org.openmetadata.schema.entity.data.Spreadsheet;
 import org.openmetadata.schema.entity.data.Worksheet;
@@ -59,6 +63,7 @@ import org.openmetadata.service.Entity;
 import org.openmetadata.service.exception.EntityNotFoundException;
 import org.openmetadata.service.resources.drives.WorksheetResource;
 import org.openmetadata.service.util.EntityUtil;
+import org.openmetadata.service.util.EntityUtil.RelationIncludes;
 import org.openmetadata.service.util.FullyQualifiedName;
 
 @Slf4j
@@ -128,20 +133,45 @@ public class WorksheetRepository extends EntityRepository<Worksheet> {
   }
 
   @Override
-  public void storeEntity(Worksheet worksheet, boolean update) {
-    // Relationships and fields such as service and spreadsheet are derived and not stored as part
-    // of json
-    EntityReference service = worksheet.getService();
-    EntityReference spreadsheet = worksheet.getSpreadsheet();
-    worksheet.withService(null).withSpreadsheet(null);
+  protected List<String> getFieldsStrippedFromStorageJson() {
+    return List.of("service", "spreadsheet");
+  }
 
-    // Don't store column tags as JSON but build it on the fly based on relationships
-    List<Column> columnWithTags = worksheet.getColumns();
-    worksheet.setColumns(ColumnUtil.cloneWithoutTags(columnWithTags));
-    worksheet.getColumns().forEach(column -> column.setTags(null));
+  @Override
+  protected ObjectNode storageJsonNode(Worksheet worksheet) {
+    ObjectNode node = super.storageJsonNode(worksheet);
+    stripColumnTags(node.get("columns"));
+    return node;
+  }
+
+  private void stripColumnTags(JsonNode columnsNode) {
+    if (!(columnsNode instanceof ArrayNode columnArray)) {
+      return;
+    }
+    for (JsonNode column : columnArray) {
+      if (!(column instanceof ObjectNode columnNode)) {
+        continue;
+      }
+      columnNode.remove("tags");
+      stripColumnTags(columnNode.get("children"));
+    }
+  }
+
+  @Override
+  public void storeEntity(Worksheet worksheet, boolean update) {
     store(worksheet, update);
-    // Restore the relationships
-    worksheet.withColumns(columnWithTags).withService(service).withSpreadsheet(spreadsheet);
+  }
+
+  @Override
+  public void storeEntities(List<Worksheet> worksheets) {
+    storeMany(worksheets);
+  }
+
+  @Override
+  protected void clearEntitySpecificRelationshipsForMany(List<Worksheet> entities) {
+    if (entities.isEmpty()) return;
+    List<UUID> ids = entities.stream().map(Worksheet::getId).toList();
+    deleteToMany(ids, Entity.WORKSHEET, Relationship.CONTAINS, Entity.SPREADSHEET);
   }
 
   @Override
@@ -172,7 +202,8 @@ public class WorksheetRepository extends EntityRepository<Worksheet> {
   }
 
   @Override
-  public void setFields(Worksheet worksheet, EntityUtil.Fields fields) {
+  public void setFields(
+      Worksheet worksheet, EntityUtil.Fields fields, RelationIncludes relationIncludes) {
     setDefaultFields(worksheet);
     setInheritedFields(worksheet, fields);
     if (fields.contains(COLUMN_FIELD) && worksheet.getColumns() != null) {
@@ -242,9 +273,20 @@ public class WorksheetRepository extends EntityRepository<Worksheet> {
 
   private void setDefaultFields(Worksheet worksheet) {
     EntityReference spreadsheet = getSpreadsheet(worksheet);
+    if (spreadsheet == null) {
+      LOG.warn("Missing spreadsheet relationship for worksheet {}", worksheet.getId());
+      worksheet.withSpreadsheet(null).withService(null);
+      return;
+    }
     EntityReference service =
         getFromEntityRef(
-            spreadsheet.getId(), SPREADSHEET, Relationship.CONTAINS, Entity.DRIVE_SERVICE, true);
+            spreadsheet.getId(), SPREADSHEET, Relationship.CONTAINS, Entity.DRIVE_SERVICE, false);
+    if (service == null) {
+      LOG.warn(
+          "Missing driveService relationship for spreadsheet {} linked to worksheet {}",
+          spreadsheet.getId(),
+          worksheet.getId());
+    }
     worksheet.withService(service);
     worksheet.withSpreadsheet(spreadsheet);
   }
@@ -297,13 +339,20 @@ public class WorksheetRepository extends EntityRepository<Worksheet> {
   }
 
   private EntityReference getSpreadsheet(Worksheet worksheet) {
-    return getFromEntityRef(worksheet.getId(), Relationship.CONTAINS, SPREADSHEET, true);
+    return getFromEntityRef(worksheet.getId(), Relationship.CONTAINS, SPREADSHEET, false);
   }
 
   @Override
   public String exportToCsv(String name, String user, boolean recursive) throws IOException {
+    return exportToCsv(name, user, recursive, null);
+  }
+
+  @Override
+  public String exportToCsv(
+      String name, String user, boolean recursive, CsvExportProgressCallback callback)
+      throws IOException {
     Worksheet worksheet = getByName(null, name, EntityUtil.Fields.EMPTY_FIELDS);
-    return new WorksheetCsv(worksheet, user).exportCsv(listOf(worksheet));
+    return new WorksheetCsv(worksheet, user).exportCsv(listOf(worksheet), callback);
   }
 
   @Override
@@ -488,19 +537,47 @@ public class WorksheetRepository extends EntityRepository<Worksheet> {
     @Override
     public void entitySpecificUpdate(boolean consolidatingChanges) {
       LOG.info("WorksheetUpdater.entitySpecificUpdate called");
-      recordChange("worksheetId", original.getWorksheetId(), updated.getWorksheetId());
-      recordChange("index", original.getIndex(), updated.getIndex());
-      recordChange("rowCount", original.getRowCount(), updated.getRowCount());
-      recordChange("columnCount", original.getColumnCount(), updated.getColumnCount());
-      // Use updateColumns for proper column handling including tags
-      LOG.info(
-          "Calling updateColumns with original columns: {} and updated columns: {}",
-          original.getColumns() != null ? original.getColumns().size() : "null",
-          updated.getColumns() != null ? updated.getColumns().size() : "null");
-      updateColumns(
-          COLUMN_FIELD, original.getColumns(), updated.getColumns(), EntityUtil.columnMatch);
-      recordChange("isHidden", original.getIsHidden(), updated.getIsHidden());
-      recordChange("sampleData", original.getSampleData(), updated.getSampleData());
+      compareAndUpdate(
+          "worksheetId",
+          () -> {
+            recordChange("worksheetId", original.getWorksheetId(), updated.getWorksheetId());
+          });
+      compareAndUpdate(
+          "index",
+          () -> {
+            recordChange("index", original.getIndex(), updated.getIndex());
+          });
+      compareAndUpdate(
+          "rowCount",
+          () -> {
+            recordChange("rowCount", original.getRowCount(), updated.getRowCount());
+          });
+      compareAndUpdate(
+          "columnCount",
+          () -> {
+            recordChange("columnCount", original.getColumnCount(), updated.getColumnCount());
+          });
+      compareAndUpdate(
+          "columns",
+          () -> {
+            // Use updateColumns for proper column handling including tags
+            LOG.info(
+                "Calling updateColumns with original columns: {} and updated columns: {}",
+                original.getColumns() != null ? original.getColumns().size() : "null",
+                updated.getColumns() != null ? updated.getColumns().size() : "null");
+            updateColumns(
+                COLUMN_FIELD, original.getColumns(), updated.getColumns(), EntityUtil.columnMatch);
+          });
+      compareAndUpdate(
+          "isHidden",
+          () -> {
+            recordChange("isHidden", original.getIsHidden(), updated.getIsHidden());
+          });
+      compareAndUpdate(
+          "sampleData",
+          () -> {
+            recordChange("sampleData", original.getSampleData(), updated.getSampleData());
+          });
     }
   }
 }

@@ -54,6 +54,12 @@ export class UserClass {
       data: this.data,
     });
 
+    if (!response.ok()) {
+      throw new Error(
+        `UserClass.create() failed with status ${response.status()}: ${await response.text()}`
+      );
+    }
+
     this.responseData = await response.json();
     if (assignRole) {
       const { entity } = await this.patch({
@@ -198,7 +204,7 @@ export class UserClass {
   }
 
   getUserDisplayName() {
-    return this.responseData.displayName;
+    return this.responseData.displayName ?? this.responseData.name;
   }
 
   async login(
@@ -207,8 +213,14 @@ export class UserClass {
     password = this.data.password
   ) {
     await page.goto('/');
-    await page.waitForURL('**/signin');
-    await page.waitForLoadState('networkidle');
+    try {
+      await page.waitForURL('**/signin', { timeout: 5000 });
+    } catch {
+      await page.context().clearCookies();
+      await page.goto('/signin');
+      await page.waitForURL('**/signin');
+    }
+    await page.waitForLoadState('domcontentloaded');
     const emailInput = page.locator('input[id="email"]');
     await emailInput.waitFor({ state: 'visible' });
     await emailInput.fill(userName);
@@ -217,6 +229,12 @@ export class UserClass {
     const loginRes = page.waitForResponse('/api/v1/auth/login');
     await page.getByTestId('login').click();
     await loginRes;
+    await page
+      .waitForURL((url) => !url.pathname.includes('/signin'), {
+        timeout: 60000,
+      })
+      .catch(() => undefined);
+    await page.waitForLoadState('domcontentloaded').catch(() => undefined);
 
     const modal = await page
       .getByRole('dialog')
@@ -230,11 +248,13 @@ export class UserClass {
     }
 
     // Collapse the left side bar after logging in if it's open
-    const leftNavBar = page.locator('[data-testid="left-sidebar"]');
+    const leftNavBar = page.getByTestId('left-sidebar');
 
-    const hasOpenClass = await leftNavBar.evaluate((el) =>
-      el.classList.contains('sidebar-open')
-    );
+    const hasOpenClass = await leftNavBar
+      .evaluate((el) => el.classList.contains('sidebar-open'), null, {
+        timeout: 10000,
+      })
+      .catch(() => false);
 
     if (hasOpenClass) {
       await page.getByTestId('sidebar-toggle').click();
@@ -244,13 +264,33 @@ export class UserClass {
   async logout(page: Page) {
     await page.getByRole('menuitem', { name: 'Logout' }).click();
 
-    const waitLogout = page.waitForResponse('/api/v1/users/logout');
+    // Wait for logout confirmation modal specifically
+    await page
+      .locator('.ant-modal-body')
+      .filter({ hasText: 'Are you sure you want' })
+      .waitFor({ state: 'visible' });
+
+    const waitLogout = page.waitForResponse(
+      (response) =>
+        response.url().includes('/api/v1/users/logout') &&
+        response.request().method() === 'POST'
+    );
+    const waitSigninNavigation = page.waitForURL('**/signin');
+
+    // Block analytics collect calls to prevent 401 errors that cause
+    // page context to close in fast environments (AUT)
+    await page.route('**/analytics/web/events/collect', (route) => {
+      route.abort();
+    });
 
     await page.getByTestId('confirm-logout').click();
 
-    await waitLogout;
+    // Wait for both logout API and navigation to complete
+    await Promise.all([waitLogout, waitSigninNavigation]);
 
-    // Confirm the signin redirection to ensure the token is cleared
-    await page.waitForURL('**/signin');
+    // Ensure all network requests complete
+
+    // Clean up the route interception
+    await page.unroute('**/analytics/web/events/collect');
   }
 }

@@ -14,11 +14,14 @@
 import { render, screen } from '@testing-library/react';
 import { OperationPermission } from '../../../context/PermissionProvider/PermissionProvider.interface';
 import { EntityTabs } from '../../../enums/entity.enum';
+import { EntityReference } from '../../../generated/entity/type';
 import {
   mockedGlossaryTerms,
   MOCK_ASSETS_DATA,
   MOCK_PERMISSIONS,
 } from '../../../mocks/Glossary.mock';
+import * as CommonUtils from '../../../utils/CommonUtils';
+import glossaryTermClassBase from '../../../utils/Glossary/GlossaryTermClassBase';
 import { useRequiredParams } from '../../../utils/useRequiredParams';
 import GlossaryTerms from './GlossaryTermsV1.component';
 
@@ -70,6 +73,11 @@ jest.mock('../GlossaryHeader/GlossaryHeader.component', () =>
 jest.mock('../../Customization/GenericTab/GenericTab', () => ({
   GenericTab: jest.fn().mockImplementation(() => <div>GenericTab</div>),
 }));
+jest.mock('../../OntologyExplorer', () => ({
+  OntologyExplorer: jest
+    .fn()
+    .mockImplementation(() => <div>OntologyExplorer</div>),
+}));
 
 const mockProps = {
   isSummaryPanelOpen: false,
@@ -84,15 +92,25 @@ const mockProps = {
   } as OperationPermission,
   glossaryTerm: {
     ...mockedGlossaryTerms[0],
-    children: mockedGlossaryTerms[0].children?.map((child: any) => ({
-      id: child.id,
-      name: child.name,
-      displayName: child.displayName,
-      description: child.description,
-      fullyQualifiedName: child.fullyQualifiedName,
-      type: 'glossaryTerm', // Required field for EntityReference
-      deleted: child.deleted || false,
-    })),
+    children: mockedGlossaryTerms[0].children?.map(
+      (child: {
+        id: string;
+        name: string;
+        displayName: string;
+        description: string;
+        fullyQualifiedName: string;
+        deleted?: boolean;
+      }) =>
+        ({
+          id: child.id,
+          name: child.name,
+          displayName: child.displayName,
+          description: child.description,
+          fullyQualifiedName: child.fullyQualifiedName,
+          type: 'glossaryTerm', // Required field for EntityReference
+          deleted: child.deleted || false,
+        } as EntityReference)
+    ),
   },
   termsLoading: false,
   handleGlossaryTermUpdate: jest.fn(),
@@ -112,6 +130,22 @@ jest.mock('../../../utils/GlossaryTerm/GlossaryTermUtil', () => ({
   getTabLabelMap: jest.fn().mockReturnValue({}),
 }));
 
+jest.mock('../../../hooks/useCustomPages', () => ({
+  useCustomPages: jest
+    .fn()
+    .mockReturnValue({ customizedPage: null, isLoading: false }),
+}));
+
+jest.mock('../../../utils/CustomizePage/CustomizePageUtils', () => ({
+  checkIfExpandViewSupported: jest.fn().mockReturnValue(false),
+  getDetailsTabWithNewLabel: jest.fn().mockImplementation((items) => items),
+  getTabLabelMapFromTabs: jest.fn().mockReturnValue({}),
+}));
+
+jest.mock('../useGlossary.store', () => ({
+  useGlossaryStore: jest.fn().mockReturnValue({ onAddGlossaryTerm: jest.fn() }),
+}));
+
 jest.mock('../../Customization/GenericProvider/GenericProvider', () => {
   return {
     useGenericContext: jest.fn().mockImplementation(() => ({
@@ -122,10 +156,6 @@ jest.mock('../../Customization/GenericProvider/GenericProvider', () => {
   };
 });
 
-jest.mock('../../../utils/TableColumn.util', () => ({
-  ownerTableObject: jest.fn().mockReturnValue([{}]),
-}));
-
 describe('Test Glossary-term component', () => {
   it('Should render overview tab when activeTab is undefined', async () => {
     render(<GlossaryTerms {...mockProps} />);
@@ -134,7 +164,7 @@ describe('Test Glossary-term component', () => {
 
     const tabs = await screen.findAllByRole('tab');
 
-    expect(tabs).toHaveLength(5);
+    expect(tabs).toHaveLength(6);
     expect(tabs[0].textContent).toBe('label.overview');
 
     tabs
@@ -159,13 +189,73 @@ describe('Test Glossary-term component', () => {
 
     expect(await screen.findByText('GlossaryTermTab')).toBeInTheDocument();
 
-    expect(tabs).toHaveLength(5);
+    expect(tabs).toHaveLength(6);
     expect(tabs.map((tab) => tab.textContent)).toStrictEqual([
       'label.overview',
       'label.glossary-term-plural2',
       'label.asset-plural0',
       'label.activity-feed-and-task-plural0',
+      'label.relations-graph',
       'label.custom-property-plural',
     ]);
+  });
+
+  it('should call getGlossaryTermDetailPageTabs without onExtensionUpdate', async () => {
+    const spy = jest.spyOn(
+      glossaryTermClassBase,
+      'getGlossaryTermDetailPageTabs'
+    );
+    const useRequiredParamsMock = useRequiredParams as jest.Mock;
+    useRequiredParamsMock.mockReturnValue({
+      tab: EntityTabs.OVERVIEW,
+      version: undefined,
+    });
+
+    render(<GlossaryTerms {...mockProps} />);
+
+    await screen.findByTestId('glossary-term');
+
+    expect(spy).toHaveBeenCalled();
+    expect(spy.mock.calls[0][0]).not.toHaveProperty('onExtensionUpdate');
+
+    spy.mockRestore();
+  });
+
+  it('should call getFeedCounts on mount when not in version view', async () => {
+    const getFeedCountsSpy = jest
+      .spyOn(CommonUtils, 'getFeedCounts')
+      .mockImplementation(jest.fn());
+    const useRequiredParamsMock = useRequiredParams as jest.Mock;
+    useRequiredParamsMock.mockReturnValue({
+      tab: EntityTabs.OVERVIEW,
+      version: undefined,
+    });
+
+    render(<GlossaryTerms {...mockProps} isVersionView={false} />);
+
+    await screen.findByTestId('glossary-term');
+
+    expect(getFeedCountsSpy).toHaveBeenCalled();
+
+    getFeedCountsSpy.mockRestore();
+  });
+
+  it('should not call getFeedCounts when in version view', async () => {
+    const getFeedCountsSpy = jest
+      .spyOn(CommonUtils, 'getFeedCounts')
+      .mockImplementation(jest.fn());
+    const useRequiredParamsMock = useRequiredParams as jest.Mock;
+    useRequiredParamsMock.mockReturnValue({
+      tab: EntityTabs.OVERVIEW,
+      version: '0.1',
+    });
+
+    render(<GlossaryTerms {...mockProps} isVersionView />);
+
+    await screen.findByTestId('glossary-term');
+
+    expect(getFeedCountsSpy).not.toHaveBeenCalled();
+
+    getFeedCountsSpy.mockRestore();
   });
 });

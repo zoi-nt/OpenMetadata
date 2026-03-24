@@ -14,7 +14,7 @@ Openlineage Source Model module
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 
 @dataclass
@@ -41,6 +41,15 @@ class TableFQN:
 
 
 @dataclass
+class TopicFQN:
+    """
+    Fully Qualified Name of a Topic.
+    """
+
+    value: str
+
+
+@dataclass
 class ColumnFQN:
     """
     Fully Qualified Name of a Column.
@@ -56,7 +65,7 @@ class LineageNode:
     """
 
     uuid: str
-    fqn: TableFQN
+    fqn: Union[TableFQN, TopicFQN]
     node_type: str = "table"
 
 
@@ -81,9 +90,37 @@ class TableDetails:
     database: Optional[str] = None
 
 
+@dataclass
+class TopicDetails:
+    """
+    Minimal topic information extracted from OpenLineage events.
+    broker_hostname is extracted from the OpenLineage kafka:// namespace
+    and used to match against messaging service bootstrapServers.
+    """
+
+    name: str
+    broker_hostname: str
+
+
+@dataclass
+class EntityDetails:
+    """
+    Union type for either table or topic details.
+    """
+
+    entity_type: str
+    table_details: Optional[TableDetails] = None
+    topic_details: Optional[TopicDetails] = None
+
+
 class EventType(str, Enum):
     """
     List of used OpenLineage event types.
     """
 
+    START = "START"
+    RUNNING = "RUNNING"
     COMPLETE = "COMPLETE"
+    ABORT = "ABORT"
+    FAIL = "FAIL"
+    OTHER = "OTHER"

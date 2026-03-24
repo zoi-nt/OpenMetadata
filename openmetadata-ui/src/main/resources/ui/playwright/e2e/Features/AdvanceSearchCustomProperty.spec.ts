@@ -71,13 +71,13 @@ test.describe('Advanced Search Custom Property', () => {
 
       await customPropertyResponse;
 
-      await page.waitForSelector('.ant-skeleton-active', {
+      await page.locator('.ant-skeleton-active').first().waitFor({
         state: 'detached',
       });
 
       await page
         .getByTestId(`custom-property-${durationPropertyName}-card`)
-        .locator('svg')
+        .getByTestId('edit-icon')
         .click(); // Add Custom Property Value
 
       await page.getByTestId('duration-input').fill(durationPropertyValue);

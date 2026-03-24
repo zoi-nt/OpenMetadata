@@ -88,3 +88,24 @@ $$section
 Enable automatic performance tuning based on cluster capabilities and database entity count
 
 $$
+
+$$section
+### Use Distributed Indexing $(id="useDistributedIndexing")
+
+Enable distributed indexing to scale reindexing across multiple servers with fault tolerance and parallel processing
+
+$$
+
+$$section
+### Partition Size $(id="partitionSize")
+
+Number of entities per partition for distributed indexing. Smaller values create more partitions for better distribution across servers. Range: 1000-50000.
+
+$$
+
+$$section
+### Time Series Max Days $(id="timeSeriesMaxDays")
+
+Maximum age in days for time series data during reindexing. Default 0 (index all data). Set to a positive value like 15 to limit to recent data only.
+
+$$

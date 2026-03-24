@@ -14,12 +14,14 @@ Table Column Count Metric definition
 """
 # pylint: disable=duplicate-code
 
-from typing import cast
+from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy import inspect, literal
 from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.orm import DeclarativeMeta
 from sqlalchemy.sql.functions import FunctionElement
+
+if TYPE_CHECKING:
+    from metadata.profiler.processor.runner import PandasRunner
 
 from metadata.generated.schema.configuration.profilerConfiguration import MetricType
 from metadata.profiler.metrics.core import CACHE, StaticMetric, _label
@@ -46,6 +48,14 @@ def _(element, compiler, **kw):
     return f"CAST({proc} AS BIGINT)"
 
 
+@compiles(ColumnCountFn, Dialects.Informix)
+def _(element, compiler, **kw):
+    """Informix JDBC rejects ? in SELECT expressions. literal_binds=True inlines
+    the value directly into SQL so no bind parameter placeholder is generated."""
+    kw["literal_binds"] = True
+    return compiler.process(element.clauses, **kw)
+
+
 class ColumnCount(StaticMetric):
     """
     COLUMN_COUNT Metric
@@ -54,10 +64,12 @@ class ColumnCount(StaticMetric):
 
     This Metric needs to be initialised passing the Table
     information:
-    add_props(table=table)(Metrics.COLUMN_COUNT.value)
+    add_props(table=table)(Metrics.columnCount.value)
     """
 
-    table: DeclarativeMeta
+    schema_metric_type = MetricType.columnCount
+
+    table: type
 
     @classmethod
     def name(cls):
@@ -79,12 +91,14 @@ class ColumnCount(StaticMetric):
         """sqlalchemy function"""
         if not hasattr(self, "table"):
             raise AttributeError(
-                "Column Count requires a table to be set: add_props(table=...)(Metrics.COLUMN_COUNT)"
+                "Column Count requires a table to be set: add_props(table=...)(Metrics.columnCount)"
             )
         return ColumnCountFn(literal(len(inspect(self.table).c)))
 
-    def df_fn(self, dfs=None):
+    def df_fn(self, dfs: Optional["PandasRunner"] = None):
         """dataframe function"""
-        from pandas import DataFrame  # pylint: disable=import-outside-toplevel
 
-        return len(cast(DataFrame, dfs[0]).columns)
+        if dfs is None:
+            return None
+
+        return len(next(dfs()).columns)

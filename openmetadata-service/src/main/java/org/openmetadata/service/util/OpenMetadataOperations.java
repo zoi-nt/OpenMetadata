@@ -14,10 +14,9 @@ import static org.openmetadata.service.util.UserUtil.updateUserWithHashedPwd;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.LoggerContext;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.gson.Gson;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import io.dropwizard.configuration.EnvironmentVariableSubstitutor;
 import io.dropwizard.configuration.FileConfigurationSourceProvider;
 import io.dropwizard.configuration.SubstitutingSourceProvider;
@@ -26,11 +25,14 @@ import io.dropwizard.db.DataSourceFactory;
 import io.dropwizard.jackson.Jackson;
 import io.dropwizard.jersey.validation.Validators;
 import jakarta.validation.Validator;
+import java.io.File;
+import java.io.FileWriter;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -50,7 +52,11 @@ import org.jdbi.v3.core.Handle;
 import org.jdbi.v3.core.Jdbi;
 import org.openmetadata.schema.EntityInterface;
 import org.openmetadata.schema.api.configuration.OpenMetadataBaseUrlConfiguration;
+import org.openmetadata.schema.api.security.AuthenticationConfiguration;
+import org.openmetadata.schema.api.security.AuthorizerConfiguration;
 import org.openmetadata.schema.auth.JWTAuthMechanism;
+import org.openmetadata.schema.auth.JWTTokenExpiry;
+import org.openmetadata.schema.configuration.SecurityConfiguration;
 import org.openmetadata.schema.email.SmtpSettings;
 import org.openmetadata.schema.entity.Bot;
 import org.openmetadata.schema.entity.app.App;
@@ -78,6 +84,7 @@ import org.openmetadata.search.IndexMapping;
 import org.openmetadata.search.IndexMappingLoader;
 import org.openmetadata.service.Entity;
 import org.openmetadata.service.OpenMetadataApplicationConfig;
+import org.openmetadata.service.OpenMetadataApplicationConfigHolder;
 import org.openmetadata.service.TypeRegistry;
 import org.openmetadata.service.apps.ApplicationHandler;
 import org.openmetadata.service.apps.bundles.insights.DataInsightsApp;
@@ -93,6 +100,7 @@ import org.openmetadata.service.jdbi3.AppMarketPlaceRepository;
 import org.openmetadata.service.jdbi3.AppRepository;
 import org.openmetadata.service.jdbi3.BotRepository;
 import org.openmetadata.service.jdbi3.CollectionDAO;
+import org.openmetadata.service.jdbi3.EntityRelationshipRepository;
 import org.openmetadata.service.jdbi3.EntityRepository;
 import org.openmetadata.service.jdbi3.EventSubscriptionRepository;
 import org.openmetadata.service.jdbi3.IngestionPipelineRepository;
@@ -105,6 +113,7 @@ import org.openmetadata.service.jdbi3.TeamRepository;
 import org.openmetadata.service.jdbi3.TypeRepository;
 import org.openmetadata.service.jdbi3.UserRepository;
 import org.openmetadata.service.jdbi3.locator.ConnectionType;
+import org.openmetadata.service.migration.MigrationValidationClient;
 import org.openmetadata.service.migration.api.MigrationWorkflow;
 import org.openmetadata.service.resources.CollectionRegistry;
 import org.openmetadata.service.resources.apps.AppMapper;
@@ -161,13 +170,150 @@ public class OpenMetadataOperations implements Callable<Integer> {
   public Integer call() {
     LOG.info(
         "Subcommand needed: 'info', 'validate', 'repair', 'check-connection', "
-            + "'drop-create', 'changelog', 'migrate', 'migrate-secrets', 'reindex', 'reindex-rdf', 'reindexdi', 'deploy-pipelines', "
+            + "'drop-create', 'changelog', 'migrate', 'migrate-secrets', 'reindex', 'reembed', 'reindex-rdf', 'reindexdi', 'deploy-pipelines', "
             + "'dbServiceCleanup', 'relationshipCleanup', 'tagUsageCleanup', 'drop-indexes', 'remove-security-config', 'create-indexes', "
-            + "'setOpenMetadataUrl', 'configureEmailSettings', 'install-app', 'delete-app', 'create-user', 'reset-password', "
-            + "'syncAlertOffset', 'analyze-tables'");
+            + "'setOpenMetadataUrl', 'configureEmailSettings', 'get-security-config', 'update-security-config', 'install-app', 'delete-app', 'create-user', 'reset-password', "
+            + "'syncAlertOffset', 'analyze-tables', 'cleanup-flowable-history', 'regenerate-bot-tokens'");
     LOG.info(
         "Use 'reindex --auto-tune' for automatic performance optimization based on cluster capabilities");
+    LOG.info(
+        "Use 'cleanup-flowable-history --delete --runtime-batch-size=1000 --history-batch-size=1000' for Flowable cleanup with custom options");
+    LOG.info(
+        "Use 'regenerate-bot-tokens --expiry <value>' to regenerate all bot JWT tokens. "
+            + "Expiry values: OneHour, One (1 day), Seven (7 days), Thirty, Sixty, Ninety, Unlimited (default)");
     return 0;
+  }
+
+  @Command(
+      name = "info",
+      description =
+          "Shows the list of migrations applied and the pending migration "
+              + "waiting to be applied on the target database")
+  public Integer info() {
+    try {
+      parseConfig();
+
+      // Then get the native migration info from SERVER_CHANGE_LOG and SERVER_MIGRATION_SQL_LOGS
+      LOG.info("Native System Data Migrations:");
+      MigrationDAO migrationDAO = jdbi.onDemand(MigrationDAO.class);
+      List<MigrationDAO.ServerChangeLog> serverChangeLogs =
+          migrationDAO.listMetricsFromDBMigrations();
+
+      // Create a formatted display for native migrations
+      Set<String> columns = new LinkedHashSet<>(Set.of("version", "installedOn", "status"));
+      List<List<String>> rows = new ArrayList<>();
+
+      for (MigrationDAO.ServerChangeLog serverChangeLog : serverChangeLogs) {
+        List<String> row = new ArrayList<>();
+        row.add(serverChangeLog.getVersion());
+        row.add(serverChangeLog.getInstalledOn());
+
+        if (serverChangeLog.getMetrics() != null) {
+          JsonNode metricsJson = new ObjectMapper().readTree(serverChangeLog.getMetrics());
+          metricsJson
+              .fields()
+              .forEachRemaining(
+                  entry -> {
+                    if (!columns.contains(entry.getKey())) {
+                      columns.add(entry.getKey());
+                    }
+                    row.add(entry.getValue().toString());
+                  });
+        }
+        rows.add(row);
+      }
+
+      printToAsciiTable(columns.stream().toList(), rows, "No Native Migrations Found");
+
+      return 0;
+    } catch (Exception e) {
+      LOG.error("Failed due to ", e);
+      return 1;
+    }
+  }
+
+  @Command(
+      name = "validate",
+      description =
+          "Checks if the all the migrations haven been applied " + "on the target database.")
+  public Integer validate() {
+    try {
+      parseConfig();
+      // Validate native migrations
+      ConnectionType connType = ConnectionType.from(config.getDataSourceFactory().getDriverClass());
+      DatasourceConfig.initialize(connType.label);
+      MigrationWorkflow workflow =
+          new MigrationWorkflow(
+              jdbi,
+              config.getMigrationConfiguration().getNativePath(),
+              connType,
+              config.getMigrationConfiguration().getExtensionPath(),
+              config.getMigrationConfiguration().getFlywayPath(),
+              config,
+              false);
+      workflow.loadMigrations();
+      workflow.validateMigrationsForServer();
+      return 0;
+    } catch (Exception e) {
+      LOG.error("Database migration validation failed due to ", e);
+      return 1;
+    }
+  }
+
+  @Command(
+      name = "repair",
+      description =
+          "Repairs the SERVER_MIGRATION_SQL_LOGS and SERVER_CHANGE_LOG tables which are used to track "
+              + "all the migrations on the target database This involves removing entries for the failed migrations and update"
+              + "the checksum of migrations already applied on the target database")
+  public Integer repair() {
+    try {
+      parseConfig();
+      // Get the migration workflow to repair native migrations
+      ConnectionType connType = ConnectionType.from(config.getDataSourceFactory().getDriverClass());
+      DatasourceConfig.initialize(connType.label);
+
+      // Handle repair of SERVER_MIGRATION_SQL_LOGS and SERVER_CHANGE_LOG tables
+      try {
+        List<String> failedVersions =
+            jdbi.withHandle(
+                handle ->
+                    handle
+                        .createQuery(
+                            "SELECT version FROM SERVER_CHANGE_LOG WHERE status = 'FAILED'")
+                        .mapTo(String.class)
+                        .list());
+
+        if (!failedVersions.isEmpty()) {
+          LOG.info("Found {} failed migrations in SERVER_CHANGE_LOG", failedVersions.size());
+
+          // Remove failed migrations from SERVER_CHANGE_LOG
+          jdbi.useHandle(
+              handle ->
+                  handle
+                      .createUpdate("DELETE FROM SERVER_CHANGE_LOG WHERE status = 'FAILED'")
+                      .execute());
+
+          // Clean up related entries in SERVER_MIGRATION_SQL_LOGS
+          for (String version : failedVersions) {
+            jdbi.useHandle(
+                handle ->
+                    handle
+                        .createUpdate(
+                            "DELETE FROM SERVER_MIGRATION_SQL_LOGS WHERE version = :version")
+                        .bind("version", version)
+                        .execute());
+          }
+        }
+      } catch (Exception e) {
+        LOG.error("Error repairing SERVER_CHANGE_LOG and SERVER_MIGRATION_SQL_LOGS tables", e);
+        throw e;
+      }
+      return 0;
+    } catch (Exception e) {
+      LOG.error("Repair of migration tables failed due to ", e);
+      return 1;
+    }
   }
 
   @Command(
@@ -310,6 +456,226 @@ public class OpenMetadataOperations implements Callable<Integer> {
 
     } catch (Exception e) {
       LOG.error("Failed to configure email settings due to: ", e);
+      return 1;
+    }
+  }
+
+  @Command(
+      name = "get-security-config",
+      description =
+          "Export the current security configuration (authentication and authorization) from the database to a YAML file. "
+              + "This command is useful for backup purposes or when you need to review/modify the security configuration externally, "
+              + "especially during SSO lockout scenarios.")
+  public Integer getSecurityConfig(
+      @Option(
+              names = {"-o", "--output-file"},
+              description =
+                  "Path to the output YAML file where the security configuration will be saved",
+              required = true)
+          String outputFile) {
+    try {
+      parseConfig();
+
+      LOG.info("Retrieving security configuration from database...");
+      SystemRepository systemRepository = Entity.getSystemRepository();
+
+      Settings authenticationSettings =
+          systemRepository.getConfigWithKey(SettingsType.AUTHENTICATION_CONFIGURATION.value());
+      Settings authorizerSettings =
+          systemRepository.getConfigWithKey(SettingsType.AUTHORIZER_CONFIGURATION.value());
+
+      if (authenticationSettings == null && authorizerSettings == null) {
+        LOG.warn("No security configuration found in the database.");
+        LOG.info("The system may not have security configured yet.");
+        return 1;
+      }
+
+      SecurityConfiguration securityConfig = new SecurityConfiguration();
+
+      if (authenticationSettings != null) {
+        AuthenticationConfiguration authConfig =
+            JsonUtils.convertValue(
+                authenticationSettings.getConfigValue(), AuthenticationConfiguration.class);
+        securityConfig.setAuthenticationConfiguration(authConfig);
+
+        LOG.info("Authentication Configuration:");
+        LOG.info("  Provider: {}", authConfig.getProvider());
+        LOG.info("  Provider Name: {}", authConfig.getProviderName());
+
+        if (authConfig.getLdapConfiguration() != null) {
+          LOG.info("  Type: LDAP");
+          LOG.info("  LDAP Host: {}", authConfig.getLdapConfiguration().getHost());
+        } else if (authConfig.getSamlConfiguration() != null) {
+          LOG.info("  Type: SAML");
+        } else if (authConfig.getOidcConfiguration() != null) {
+          LOG.info("  Type: OIDC");
+        }
+      } else {
+        LOG.warn("No authentication configuration found.");
+      }
+
+      if (authorizerSettings != null) {
+        AuthorizerConfiguration authzConfig =
+            JsonUtils.convertValue(
+                authorizerSettings.getConfigValue(), AuthorizerConfiguration.class);
+        securityConfig.setAuthorizerConfiguration(authzConfig);
+
+        LOG.info("Authorization Configuration:");
+        LOG.info("  Class Name: {}", authzConfig.getClassName());
+        LOG.info("  Admin Principals: {}", authzConfig.getAdminPrincipals());
+      } else {
+        LOG.warn("No authorization configuration found.");
+      }
+
+      ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
+      String yamlContent =
+          yamlMapper.writerWithDefaultPrettyPrinter().writeValueAsString(securityConfig);
+
+      File file = new File(outputFile);
+      try (FileWriter writer = new FileWriter(file)) {
+        writer.write(yamlContent);
+      }
+
+      LOG.info("Security configuration successfully exported to: {}", outputFile);
+      LOG.warn("");
+      LOG.warn(
+          "IMPORTANT: The exported file may contain sensitive information (passwords, secrets, certificates).");
+      LOG.warn("Please ensure the file is stored securely and not committed to version control.");
+
+      return 0;
+    } catch (Exception e) {
+      LOG.error("Failed to export security configuration due to: ", e);
+      return 1;
+    }
+  }
+
+  @Command(
+      name = "update-security-config",
+      description =
+          "Update the security configuration (authentication and authorization) in the database from a YAML file. "
+              + "This is a critical operation that should be used carefully, especially when users are locked out due to SSO misconfiguration. "
+              + "WARNING: Incorrect configuration may lock all users out of the system!")
+  public Integer updateSecurityConfig(
+      @Option(
+              names = {"-f", "--config-file"},
+              description = "Path to the YAML file containing the security configuration",
+              required = true)
+          String configFile,
+      @Option(
+              names = {"--force"},
+              description = "Skip confirmation prompt and apply changes immediately",
+              defaultValue = "false")
+          boolean force) {
+    try {
+      File file = new File(configFile);
+      if (!file.exists()) {
+        LOG.error("Configuration file not found: {}", configFile);
+        return 1;
+      }
+
+      LOG.info("Reading security configuration from file: {}", configFile);
+      String yamlContent = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
+
+      ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
+      SecurityConfiguration securityConfig =
+          yamlMapper.readValue(yamlContent, SecurityConfiguration.class);
+
+      LOG.info("Parsed security configuration:");
+
+      if (securityConfig.getAuthenticationConfiguration() != null) {
+        AuthenticationConfiguration authConfig = securityConfig.getAuthenticationConfiguration();
+        LOG.info("Authentication Configuration:");
+        LOG.info("  Provider: {}", authConfig.getProvider());
+        LOG.info("  Provider Name: {}", authConfig.getProviderName());
+        LOG.info("  Authority: {}", authConfig.getAuthority());
+        LOG.info("  Client ID: {}", authConfig.getClientId());
+        LOG.info("  Callback URL: {}", authConfig.getCallbackUrl());
+
+        if (authConfig.getLdapConfiguration() != null) {
+          LOG.info("  LDAP Host: {}", authConfig.getLdapConfiguration().getHost());
+          LOG.info("  LDAP Port: {}", authConfig.getLdapConfiguration().getPort());
+        } else if (authConfig.getSamlConfiguration() != null) {
+          LOG.info(
+              "  SAML IDP Entity ID: {}",
+              authConfig.getSamlConfiguration().getIdp() != null
+                  ? authConfig.getSamlConfiguration().getIdp().getEntityId()
+                  : "N/A");
+        } else if (authConfig.getOidcConfiguration() != null) {
+          LOG.info("  OIDC Discovery URI: {}", authConfig.getOidcConfiguration().getDiscoveryUri());
+        }
+      } else {
+        LOG.warn("No authentication configuration in the file.");
+      }
+
+      if (securityConfig.getAuthorizerConfiguration() != null) {
+        AuthorizerConfiguration authzConfig = securityConfig.getAuthorizerConfiguration();
+        LOG.info("Authorization Configuration:");
+        LOG.info("  Class Name: {}", authzConfig.getClassName());
+        LOG.info("  Admin Principals: {}", authzConfig.getAdminPrincipals());
+      } else {
+        LOG.warn("No authorization configuration in the file.");
+      }
+
+      if (!force) {
+        LOG.warn("");
+        LOG.warn("========================================================================");
+        LOG.warn("WARNING: You are about to update the security configuration!");
+        LOG.warn("========================================================================");
+        LOG.warn("This will replace the current authentication and authorization config.");
+        LOG.warn("Incorrect configuration may lock all users out of the system.");
+        LOG.warn("");
+        LOG.warn("After applying this change, you MUST restart the OpenMetadata service");
+        LOG.warn("for the new configuration to take effect.");
+        LOG.warn("========================================================================");
+        LOG.warn("");
+
+        // Scanner on System.in should not be closed as it would close System.in entirely
+        @SuppressWarnings("resource")
+        Scanner scanner = new Scanner(System.in);
+        LOG.info("Type 'CONFIRM' to proceed with updating the security configuration: ");
+        String input = scanner.next();
+        if (!input.equals("CONFIRM")) {
+          LOG.info("Operation cancelled by user.");
+          return 0;
+        }
+      }
+
+      parseConfig();
+
+      LOG.info("Updating security configuration in database...");
+
+      if (securityConfig.getAuthenticationConfiguration() != null) {
+        Settings authenticationSettings =
+            new Settings()
+                .withConfigType(SettingsType.AUTHENTICATION_CONFIGURATION)
+                .withConfigValue(securityConfig.getAuthenticationConfiguration());
+        Entity.getSystemRepository().createOrUpdate(authenticationSettings);
+        LOG.info("Authentication configuration updated.");
+      }
+
+      if (securityConfig.getAuthorizerConfiguration() != null) {
+        Settings authorizerSettings =
+            new Settings()
+                .withConfigType(SettingsType.AUTHORIZER_CONFIGURATION)
+                .withConfigValue(securityConfig.getAuthorizerConfiguration());
+        Entity.getSystemRepository().createOrUpdate(authorizerSettings);
+        LOG.info("Authorization configuration updated.");
+      }
+
+      LOG.info("Security configuration successfully updated in the database.");
+      LOG.warn("");
+      LOG.warn("========================================================================");
+      LOG.warn("IMPORTANT: You MUST restart the OpenMetadata service now!");
+      LOG.warn("========================================================================");
+      LOG.warn(
+          "The new security configuration will NOT take effect until the service is restarted.");
+      LOG.warn("Run: 'systemctl restart openmetadata' (or equivalent for your deployment)");
+      LOG.warn("========================================================================");
+
+      return 0;
+    } catch (Exception e) {
+      LOG.error("Failed to update security configuration due to: ", e);
+      LOG.error("Please verify that the YAML file is valid and contains all required fields.");
       return 1;
     }
   }
@@ -518,7 +884,8 @@ public class OpenMetadataOperations implements Callable<Integer> {
             .withDescription(definition.getDescription())
             .withDisplayName(definition.getDisplayName())
             .withAppSchedule(new AppSchedule().withScheduleTimeline(ScheduleTimeline.NONE))
-            .withAppConfiguration(Map.of());
+            .withAppConfiguration(Map.of())
+            .withAllowBotImpersonation(Boolean.TRUE.equals(definition.getAllowBotImpersonation()));
 
     AppMapper appMapper = new AppMapper();
     App entity = appMapper.createToEntity(createApp, ADMIN_USER_NAME);
@@ -533,6 +900,40 @@ public class OpenMetadataOperations implements Callable<Integer> {
   public Integer checkConnection() {
     try {
       parseConfig();
+      // Check native tables
+      try {
+        jdbi.withHandle(
+            handle -> {
+              try {
+                handle
+                    .createQuery("SELECT COUNT(*) FROM SERVER_CHANGE_LOG")
+                    .mapTo(Integer.class)
+                    .findOne();
+                return true;
+              } catch (Exception e) {
+                LOG.warn("Could not access SERVER_CHANGE_LOG table: {}", e.getMessage());
+                return false;
+              }
+            });
+
+        // querying SERVER_MIGRATION_SQL_LOGS table
+        jdbi.withHandle(
+            handle -> {
+              try {
+                handle
+                    .createQuery("SELECT COUNT(*) FROM SERVER_MIGRATION_SQL_LOGS")
+                    .mapTo(Integer.class)
+                    .findOne();
+                return true;
+              } catch (Exception e) {
+                LOG.warn("Could not access SERVER_MIGRATION_SQL_LOGS table: {}", e.getMessage());
+                return false;
+              }
+            });
+
+      } catch (Exception e) {
+        LOG.warn("Error checking migration tables: {}", e.getMessage());
+      }
       jdbi.open().getConnection();
       return 0;
     } catch (Exception e) {
@@ -557,6 +958,7 @@ public class OpenMetadataOperations implements Callable<Integer> {
       LOG.info("OpenMetadata Database Schema is Updated.");
       LOG.info("create indexes.");
       searchRepository.createIndexes();
+      searchRepository.createOrUpdateIndexTemplates();
       Entity.cleanup();
       return 0;
     } catch (Exception e) {
@@ -597,6 +999,8 @@ public class OpenMetadataOperations implements Callable<Integer> {
         return 1;
       }
 
+      initOrganization();
+
       UserRepository userRepository = (UserRepository) Entity.getEntityRepository(Entity.USER);
       Set<String> fieldList = new HashSet<>(userRepository.getPatchFields().getFieldList());
       fieldList.add(AUTH_MECHANISM_FIELD);
@@ -635,6 +1039,8 @@ public class OpenMetadataOperations implements Callable<Integer> {
       validateAndRunSystemDataMigrations(force);
       LOG.info("Update Search Indexes.");
       searchRepository.updateIndexes();
+      LOG.info("Update Index Templates.");
+      searchRepository.createOrUpdateIndexTemplates();
       printChangeLog();
       // update entities secrets if required
       new SecretsManagerUpdateService(secretsManager, config.getClusterName()).updateEntities();
@@ -643,6 +1049,44 @@ public class OpenMetadataOperations implements Callable<Integer> {
     } catch (Exception e) {
       LOG.error("Failed to db migration due to ", e);
       return 1;
+    }
+  }
+
+  @Command(
+      name = "recover",
+      description =
+          "Recover data lost due to Flyway migration issue (roles, policies, bot relationships). "
+              + "Use this if you ran migrations with --force after upgrading from pre-1.11.0 and lost data.")
+  public Integer recover() {
+    try {
+      LOG.info("Running data recovery for Flyway migration issue...");
+      parseConfig();
+      runDataRecovery();
+      return 0;
+    } catch (Exception e) {
+      LOG.error("Failed to recover data due to ", e);
+      return 1;
+    }
+  }
+
+  private void runDataRecovery() {
+    try (Handle handle = jdbi.open()) {
+      ConnectionType connType = ConnectionType.from(config.getDataSourceFactory().getDriverClass());
+
+      org.openmetadata.service.migration.utils.v1114.MigrationUtil.checkAndLogDataLossSymptoms(
+          handle);
+      org.openmetadata.service.migration.utils.v1114.MigrationUtil.reseedRolesAndPoliciesIfMissing(
+          handle, connType);
+      org.openmetadata.service.migration.utils.v1114.MigrationUtil
+          .restoreRolePolicyRelationshipsIfMissing(handle, connType);
+      org.openmetadata.service.migration.utils.v1114.MigrationUtil.restoreBotRelationshipsIfMissing(
+          handle, connType);
+      org.openmetadata.service.migration.utils.v1114.MigrationUtil.restoreBotUserRolesIfMissing(
+          handle, connType);
+
+      LOG.info("Data recovery completed.");
+    } catch (Exception e) {
+      LOG.error("Error during data recovery: {}", e.getMessage(), e);
     }
   }
 
@@ -933,6 +1377,10 @@ public class OpenMetadataOperations implements Callable<Integer> {
       TypeRepository typeRepository = (TypeRepository) Entity.getEntityRepository(Entity.TYPE);
       TypeRegistry.instance().initialize(typeRepository);
       AppScheduler.initialize(config, collectionDAO, searchRepository);
+
+      // Prepare search repository for reindexing (e.g., initialize vector services)
+      searchRepository.prepareForReindex();
+
       String appName = "SearchIndexingApplication";
       // Handle entityStr with or without quotes
       String cleanEntityStr = entityStr;
@@ -961,6 +1409,331 @@ public class OpenMetadataOperations implements Callable<Integer> {
       LOG.error("Failed to reindex due to ", e);
       return 1;
     }
+  }
+
+  @Command(
+      name = "reembed",
+      description =
+          "Drop the vector index, recreate it, and fully re-embed all entities using the configured embedding provider.")
+  public Integer reembed(
+      @Option(
+              names = {"-b", "--batch-size"},
+              defaultValue = "300",
+              description = "Number of records to process in each batch.")
+          int batchSize,
+      @Option(
+              names = {"--producer-threads"},
+              defaultValue = "10",
+              description = "Number of producer threads for reading entity batches.")
+          int producerThreads,
+      @Option(
+              names = {"--consumer-threads"},
+              defaultValue = "5",
+              description = "Number of consumer threads for embedding updates.")
+          int consumerThreads,
+      @Option(
+              names = {"--queue-size"},
+              defaultValue = "300",
+              description = "Queue size for buffering embedding tasks.")
+          int queueSize) {
+    int finalProducerThreads =
+        producerThreads <= 0
+            ? Math.max(1, Runtime.getRuntime().availableProcessors())
+            : producerThreads;
+    int finalConsumerThreads =
+        consumerThreads <= 0
+            ? Math.max(1, Runtime.getRuntime().availableProcessors())
+            : consumerThreads;
+    int finalQueueSize = Math.max(1, queueSize);
+    java.util.concurrent.BlockingQueue<ReembedTask> taskQueue =
+        new java.util.concurrent.LinkedBlockingQueue<>(finalQueueSize);
+    java.util.concurrent.atomic.AtomicBoolean producersDone =
+        new java.util.concurrent.atomic.AtomicBoolean(false);
+    java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>
+        processedCounts = new java.util.concurrent.ConcurrentHashMap<>();
+    java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>
+        failedCounts = new java.util.concurrent.ConcurrentHashMap<>();
+    java.util.concurrent.ExecutorService producerExecutor =
+        java.util.concurrent.Executors.newFixedThreadPool(
+            finalProducerThreads, Thread.ofPlatform().name("reembed-producer-", 0).factory());
+    java.util.concurrent.ExecutorService consumerExecutor =
+        java.util.concurrent.Executors.newFixedThreadPool(
+            finalConsumerThreads, Thread.ofPlatform().name("reembed-consumer-", 0).factory());
+    try {
+      if (!OpenMetadataApplicationConfigHolder.isInitialized()) {
+        parseConfig();
+      }
+      CollectionRegistry.initialize();
+      var omConfig = OpenMetadataApplicationConfigHolder.getInstance();
+      ApplicationHandler.initialize(omConfig);
+      CollectionRegistry.getInstance()
+          .loadSeedData(Entity.getJdbi(), omConfig, null, null, null, true);
+      TypeRepository typeRepository = (TypeRepository) Entity.getEntityRepository(Entity.TYPE);
+      TypeRegistry.instance().initialize(typeRepository);
+
+      SearchRepository repo = Entity.getSearchRepository();
+      if (repo == null) {
+        LOG.error("Search repository is not initialized; cannot run re-embedding");
+        return 1;
+      }
+
+      repo.prepareForReindex();
+      org.openmetadata.service.search.vector.OpenSearchVectorService vecService =
+          org.openmetadata.service.search.vector.OpenSearchVectorService.getInstance();
+      if (vecService == null || vecService.getEmbeddingClient() == null) {
+        LOG.warn("Vector embeddings are disabled or not initialized. Skipping re-embedding.");
+        return 1;
+      }
+
+      java.util.concurrent.ConcurrentHashMap<String, Integer> entityTotals =
+          new java.util.concurrent.ConcurrentHashMap<>();
+      int totalBatches = calculateReembedTotalBatches(batchSize, entityTotals);
+      java.util.concurrent.CountDownLatch producerLatch =
+          new java.util.concurrent.CountDownLatch(totalBatches);
+
+      LOG.info(
+          "Re-embedding with producers: {}, consumers: {}, queue size: {}, batch size: {}",
+          finalProducerThreads,
+          finalConsumerThreads,
+          finalQueueSize,
+          batchSize);
+
+      java.util.concurrent.CountDownLatch consumerLatch =
+          startReembedConsumers(
+              finalConsumerThreads,
+              consumerExecutor,
+              taskQueue,
+              producersDone,
+              vecService,
+              processedCounts,
+              failedCounts);
+
+      for (String entityType :
+          org.openmetadata.service.search.vector.utils.AvailableEntityTypes.LIST) {
+        int totalRecords = entityTotals.getOrDefault(entityType, 0);
+        int batches = calculateReembedNumberOfBatches(totalRecords, batchSize);
+        if (batches == 0) {
+          LOG.info("No entities found for type {}, skipping", entityType);
+          continue;
+        }
+
+        org.openmetadata.service.workflows.searchIndex.PaginatedEntitiesSource source =
+            new org.openmetadata.service.workflows.searchIndex.PaginatedEntitiesSource(
+                entityType, batchSize, List.of("*"));
+
+        LOG.info(
+            "Scheduling re-embedding for entity type {} with {} records ({} batches)",
+            entityType,
+            totalRecords,
+            batches);
+
+        for (int i = 0; i < batches; i++) {
+          int offset = i * batchSize;
+          producerExecutor.submit(
+              () -> {
+                try {
+                  org.openmetadata.schema.utils.ResultList<? extends EntityInterface> batch =
+                      source.readWithCursor(RestUtil.encodeCursor(String.valueOf(offset)));
+                  if (batch != null && batch.getData() != null && !batch.getData().isEmpty()) {
+                    taskQueue.put(new ReembedTask(entityType, batch));
+                  }
+                  if (batch != null && batch.getErrors() != null && !batch.getErrors().isEmpty()) {
+                    failedCounts
+                        .computeIfAbsent(
+                            entityType, key -> new java.util.concurrent.atomic.AtomicInteger(0))
+                        .addAndGet(batch.getErrors().size());
+                  }
+                } catch (Exception e) {
+                  LOG.warn(
+                      "Failed to read batch for entity type {} at offset {}",
+                      entityType,
+                      offset,
+                      e);
+                } finally {
+                  producerLatch.countDown();
+                }
+              });
+        }
+      }
+
+      awaitReembedProducers(producerLatch, producerExecutor);
+      producersDone.set(true);
+      signalReembedConsumersToStop(finalConsumerThreads, taskQueue);
+      consumerLatch.await();
+
+      for (String entityType :
+          org.openmetadata.service.search.vector.utils.AvailableEntityTypes.LIST) {
+        int processed =
+            processedCounts
+                .getOrDefault(entityType, new java.util.concurrent.atomic.AtomicInteger(0))
+                .get();
+        int failed =
+            failedCounts
+                .getOrDefault(entityType, new java.util.concurrent.atomic.AtomicInteger(0))
+                .get();
+        LOG.info(
+            "Finished re-embedding {} entities for type {} (failed reads: {})",
+            processed,
+            entityType,
+            failed);
+      }
+
+      LOG.info("Re-embedding completed successfully");
+      return 0;
+    } catch (Exception e) {
+      LOG.error("Failed to run full re-embedding", e);
+      return 1;
+    } finally {
+      shutdownReembedExecutor(producerExecutor, "reembed-producer");
+      shutdownReembedExecutor(consumerExecutor, "reembed-consumer");
+    }
+  }
+
+  private record ReembedTask(
+      String entityType,
+      org.openmetadata.schema.utils.ResultList<? extends EntityInterface> batch) {}
+
+  private java.util.concurrent.CountDownLatch startReembedConsumers(
+      int consumerThreads,
+      java.util.concurrent.ExecutorService consumerExecutor,
+      java.util.concurrent.BlockingQueue<ReembedTask> taskQueue,
+      java.util.concurrent.atomic.AtomicBoolean producersDone,
+      org.openmetadata.service.search.vector.OpenSearchVectorService vecService,
+      Map<String, java.util.concurrent.atomic.AtomicInteger> processedCounts,
+      Map<String, java.util.concurrent.atomic.AtomicInteger> failedCounts) {
+    java.util.concurrent.CountDownLatch consumerLatch =
+        new java.util.concurrent.CountDownLatch(consumerThreads);
+    for (int i = 0; i < consumerThreads; i++) {
+      final int consumerId = i;
+      consumerExecutor.submit(
+          () -> {
+            try {
+              runReembedConsumer(
+                  consumerId, taskQueue, producersDone, vecService, processedCounts, failedCounts);
+            } finally {
+              consumerLatch.countDown();
+            }
+          });
+    }
+    return consumerLatch;
+  }
+
+  private void runReembedConsumer(
+      int consumerId,
+      java.util.concurrent.BlockingQueue<ReembedTask> taskQueue,
+      java.util.concurrent.atomic.AtomicBoolean producersDone,
+      org.openmetadata.service.search.vector.OpenSearchVectorService vecService,
+      Map<String, java.util.concurrent.atomic.AtomicInteger> processedCounts,
+      Map<String, java.util.concurrent.atomic.AtomicInteger> failedCounts) {
+    LOG.debug("Consumer {} started", consumerId);
+    try {
+      while (!producersDone.get() || !taskQueue.isEmpty()) {
+        ReembedTask task = taskQueue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS);
+        if (task == null) {
+          continue;
+        }
+        if (task.batch() == null) {
+          break;
+        }
+        String entityType = task.entityType();
+        String entityIndexName = resolveEntityIndexName(entityType);
+        if (entityIndexName == null) {
+          LOG.warn("No index mapping found for entity type: {}, skipping batch", entityType);
+          continue;
+        }
+        for (EntityInterface entity : task.batch().getData()) {
+          try {
+            vecService.updateEntityEmbedding(entity, entityIndexName);
+            processedCounts
+                .computeIfAbsent(
+                    entityType, key -> new java.util.concurrent.atomic.AtomicInteger(0))
+                .incrementAndGet();
+          } catch (Exception e) {
+            failedCounts
+                .computeIfAbsent(
+                    entityType, key -> new java.util.concurrent.atomic.AtomicInteger(0))
+                .incrementAndGet();
+            LOG.warn("Failed to embed entity {} of type {}", entity.getId(), entityType, e);
+          }
+        }
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    } finally {
+      LOG.debug("Consumer {} stopped", consumerId);
+    }
+  }
+
+  private String resolveEntityIndexName(String entityType) {
+    try {
+      org.openmetadata.search.IndexMapping mapping =
+          Entity.getSearchRepository().getIndexMapping(entityType);
+      if (mapping == null) {
+        return null;
+      }
+      return mapping.getIndexName(Entity.getSearchRepository().getClusterAlias());
+    } catch (Exception e) {
+      LOG.warn("Failed to resolve index name for entity type {}: {}", entityType, e.getMessage());
+      return null;
+    }
+  }
+
+  private void signalReembedConsumersToStop(
+      int consumerThreads, java.util.concurrent.BlockingQueue<ReembedTask> taskQueue) {
+    for (int i = 0; i < consumerThreads; i++) {
+      taskQueue.offer(new ReembedTask("__POISON_PILL__", null));
+    }
+  }
+
+  private void awaitReembedProducers(
+      java.util.concurrent.CountDownLatch producerLatch,
+      java.util.concurrent.ExecutorService producerExecutor)
+      throws InterruptedException {
+    while (!producerLatch.await(1, java.util.concurrent.TimeUnit.SECONDS)) {
+      if (Thread.currentThread().isInterrupted()) {
+        producerExecutor.shutdownNow();
+        throw new InterruptedException("Interrupted while waiting for producers");
+      }
+    }
+  }
+
+  private void shutdownReembedExecutor(java.util.concurrent.ExecutorService executor, String name) {
+    if (executor == null) {
+      return;
+    }
+    executor.shutdown();
+    try {
+      if (!executor.awaitTermination(1, java.util.concurrent.TimeUnit.MINUTES)) {
+        LOG.warn("Forcing shutdown of {}", name);
+        executor.shutdownNow();
+      }
+    } catch (InterruptedException e) {
+      executor.shutdownNow();
+      Thread.currentThread().interrupt();
+    }
+  }
+
+  private int calculateReembedTotalBatches(int batchSize, Map<String, Integer> entityTotals) {
+    int totalBatches = 0;
+    for (String entityType :
+        org.openmetadata.service.search.vector.utils.AvailableEntityTypes.LIST) {
+      try {
+        int totalRecords = Entity.getEntityRepository(entityType).getDao().listTotalCount();
+        entityTotals.put(entityType, totalRecords);
+        totalBatches += calculateReembedNumberOfBatches(totalRecords, batchSize);
+      } catch (EntityNotFoundException e) {
+        LOG.warn(
+            "Skipping re-embedding for entity type '{}': repository not registered", entityType);
+      }
+    }
+    return totalBatches;
+  }
+
+  private int calculateReembedNumberOfBatches(int totalRecords, int batchSize) {
+    if (totalRecords <= 0 || batchSize <= 0) {
+      return 0;
+    }
+    return (int) Math.ceil((double) totalRecords / (double) batchSize);
   }
 
   @Command(name = "syncAlertOffset", description = "Sync the Alert Offset.")
@@ -1492,6 +2265,7 @@ public class OpenMetadataOperations implements Callable<Integer> {
       LOG.info("Creating indexes for search engine...");
       parseConfig();
       searchRepository.createIndexes();
+      searchRepository.createOrUpdateIndexTemplates();
       createDataInsightsIndexes();
       Entity.cleanup();
       LOG.info("All indexes created successfully.");
@@ -1552,27 +2326,45 @@ public class OpenMetadataOperations implements Callable<Integer> {
       SearchClient searchClient = searchRepository.getSearchClient();
 
       if (searchClient instanceof ElasticSearchClient) {
-        es.org.elasticsearch.client.Request request =
-            new es.org.elasticsearch.client.Request("GET", "/_cat/indices?format=json");
-        es.org.elasticsearch.client.RestClient lowLevelClient =
-            (es.org.elasticsearch.client.RestClient) searchClient.getLowLevelClient();
-        es.org.elasticsearch.client.Response response = lowLevelClient.performRequest(request);
-        String responseBody =
-            org.apache.http.util.EntityUtils.toString(response.getEntity(), StandardCharsets.UTF_8);
+        var request =
+            new es.co.elastic.clients.transport.rest5_client.low_level.Request(
+                "GET", "/_cat/indices?format=json");
+        es.co.elastic.clients.transport.rest5_client.low_level.Rest5Client lowLevelClient =
+            (es.co.elastic.clients.transport.rest5_client.low_level.Rest5Client)
+                searchClient.getLowLevelClient();
+        var response = lowLevelClient.performRequest(request);
+        String responseBody;
+        try (var is = response.getEntity().getContent()) {
+          responseBody = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+        }
 
         com.fasterxml.jackson.databind.JsonNode root = JsonUtils.readTree(responseBody);
         for (com.fasterxml.jackson.databind.JsonNode node : root) {
           String indexName = node.get("index").asText();
           indices.add(indexName);
         }
-      } else if (searchClient instanceof OpenSearchClient) {
-        os.org.opensearch.client.Request request =
-            new os.org.opensearch.client.Request("GET", "/_cat/indices?format=json");
-        os.org.opensearch.client.RestClient lowLevelClient =
-            (os.org.opensearch.client.RestClient) searchClient.getLowLevelClient();
-        os.org.opensearch.client.Response response = lowLevelClient.performRequest(request);
+      } else if (searchClient instanceof OpenSearchClient openSearchClient) {
+        os.org.opensearch.client.opensearch.generic.OpenSearchGenericClient genericClient =
+            openSearchClient.getNewClient().generic();
+        var response =
+            genericClient.execute(
+                os.org.opensearch.client.opensearch.generic.Requests.builder()
+                    .method("GET")
+                    .endpoint("/_cat/indices?format=json")
+                    .build());
         String responseBody =
-            org.apache.http.util.EntityUtils.toString(response.getEntity(), StandardCharsets.UTF_8);
+            response
+                .getBody()
+                .map(
+                    b -> {
+                      try {
+                        return new String(b.bodyAsBytes(), StandardCharsets.UTF_8);
+                      } catch (Exception e) {
+                        LOG.warn("Failed to read response body for indices", e);
+                        return "[]";
+                      }
+                    })
+                .orElse("[]");
 
         com.fasterxml.jackson.databind.JsonNode root = JsonUtils.readTree(responseBody);
         for (com.fasterxml.jackson.databind.JsonNode node : root) {
@@ -1604,6 +2396,8 @@ public class OpenMetadataOperations implements Callable<Integer> {
         LOG.warn("This includes authenticationConfiguration and authorizerConfiguration settings.");
         LOG.info("Use --force to skip this confirmation.");
 
+        // Scanner on System.in should not be closed as it would close System.in entirely
+        @SuppressWarnings("resource")
         Scanner scanner = new Scanner(System.in);
         LOG.info("Enter 'DELETE' to confirm removal of security configuration: ");
         String input = scanner.next();
@@ -1669,6 +2463,149 @@ public class OpenMetadataOperations implements Callable<Integer> {
       return 0;
     } catch (Exception e) {
       LOG.error("Failed to analyze tables due to ", e);
+      return 1;
+    }
+  }
+
+  /**
+   * Unlike most ops commands (e.g. deploy-pipelines) that delegate to the server API, this command
+   * operates directly on the database. This is intentional: when JWT signing keys have been rotated,
+   * all existing bot tokens — including the ingestion-bot token we'd use to authenticate against the
+   * server — are invalid. We must bypass the server to regenerate tokens in this scenario.
+   */
+  @Command(
+      name = "regenerate-bot-tokens",
+      description =
+          "Regenerates JWT tokens for all bot users. "
+              + "Use this after rotating JWT signing keys or changing the cluster name.")
+  public Integer regenerateBotTokens(
+      @Option(
+              names = {"--expiry"},
+              description =
+                  "Token expiry for regenerated tokens (OneHour, One, Seven, Thirty, Sixty, Ninety, Unlimited). "
+                      + "Defaults to Unlimited.",
+              defaultValue = "Unlimited")
+          JWTTokenExpiry expiry) {
+    try {
+      parseConfig();
+      initializeCollectionRegistry();
+      SettingsCache.initialize(config);
+      initializeSecurityConfig();
+
+      JWTTokenGenerator.getInstance()
+          .init(
+              SecurityConfigurationManager.getInstance()
+                  .getCurrentAuthConfig()
+                  .getTokenValidationAlgorithm(),
+              config.getJwtTokenConfiguration());
+
+      initOrganization();
+
+      BotRepository botRepository = (BotRepository) Entity.getEntityRepository(Entity.BOT);
+      UserRepository userRepository = (UserRepository) Entity.getEntityRepository(Entity.USER);
+
+      List<Bot> bots =
+          botRepository.listAll(
+              botRepository.getFields("botUser"), new ListFilter(Include.NON_DELETED));
+
+      List<List<String>> rows = new ArrayList<>();
+
+      for (Bot listedBot : bots) {
+        String botName = listedBot.getName();
+        try {
+          // Fetch individually so that setFields populates the botUser relationship
+          Bot bot = botRepository.getByName(null, botName, botRepository.getFields("botUser"));
+
+          if (bot.getBotUser() == null) {
+            rows.add(Arrays.asList(botName, "SKIPPED", "No bot user associated"));
+            continue;
+          }
+
+          User botUser =
+              userRepository.getByName(
+                  null,
+                  bot.getBotUser().getFullyQualifiedName(),
+                  new EntityUtil.Fields(Set.of("authenticationMechanism", "roles")));
+
+          if (botUser.getAuthenticationMechanism() == null
+              || botUser.getAuthenticationMechanism().getAuthType()
+                  != AuthenticationMechanism.AuthType.JWT) {
+            rows.add(Arrays.asList(botName, "SKIPPED", "Not using JWT authentication"));
+            continue;
+          }
+
+          JWTAuthMechanism newJwtAuth =
+              JWTTokenGenerator.getInstance().generateJWTToken(botUser, expiry);
+          botUser.setAuthenticationMechanism(
+              new AuthenticationMechanism()
+                  .withAuthType(AuthenticationMechanism.AuthType.JWT)
+                  .withConfig(newJwtAuth));
+          UserUtil.addOrUpdateUser(botUser);
+
+          rows.add(Arrays.asList(botName, "SUCCESS", "Token regenerated"));
+        } catch (Exception e) {
+          LOG.error("Failed to regenerate token for bot: {}", botName, e);
+          rows.add(Arrays.asList(botName, "FAILED", e.getMessage()));
+        }
+      }
+
+      boolean hasFailures = rows.stream().anyMatch(r -> "FAILED".equals(r.get(1)));
+      printToAsciiTable(Arrays.asList("Bot", "Status", "Details"), rows, "No bots found");
+      return hasFailures ? 1 : 0;
+    } catch (Exception e) {
+      LOG.error("Failed to regenerate bot tokens due to ", e);
+      return 1;
+    }
+  }
+
+  @Command(
+      name = "cleanup-flowable-history",
+      description =
+          "Cleans up old workflow deployments and history. "
+              + "For Periodic Batch workflows: cleans up both deployments and history. "
+              + "For Event Based workflows: cleans up only history. "
+              + "By default, runs in dry-run mode to only analyze what would be cleaned.")
+  public Integer cleanupFlowableHistory(
+      @Option(
+              names = {"--delete"},
+              defaultValue = "false",
+              description =
+                  "Actually perform the cleanup. Without this flag, the command only analyzes what would be cleaned (dry-run mode).")
+          boolean delete,
+      @Option(
+              names = {"--runtime-batch-size"},
+              defaultValue = "1000",
+              description = "Batch size for runtime instance cleanup.")
+          int runtimeBatchSize,
+      @Option(
+              names = {"--history-batch-size"},
+              defaultValue = "1000",
+              description = "Batch size for history instance cleanup.")
+          int historyBatchSize) {
+    try {
+      boolean dryRun = !delete;
+      LOG.info("Running Flowable workflow cleanup. Dry run: {}", dryRun);
+
+      parseConfig();
+      initializeCollectionRegistry();
+      SettingsCache.initialize(config);
+      initializeSecurityConfig();
+      WorkflowHandler.initialize(config);
+
+      WorkflowHandler workflowHandler = WorkflowHandler.getInstance();
+      FlowableCleanup cleanup = new FlowableCleanup(workflowHandler, dryRun);
+      FlowableCleanup.FlowableCleanupResult result =
+          cleanup.performCleanup(historyBatchSize, runtimeBatchSize);
+
+      if (dryRun && !result.getCleanedWorkflows().isEmpty()) {
+        LOG.info("Dry run completed. To actually perform the cleanup, run with --delete");
+        return 1;
+      }
+
+      LOG.info("Flowable cleanup completed successfully.");
+      return 0;
+    } catch (Exception e) {
+      LOG.error("Failed to cleanup Flowable history due to ", e);
       return 1;
     }
   }
@@ -1750,10 +2687,14 @@ public class OpenMetadataOperations implements Callable<Integer> {
 
       // Make bulk deploy API call for this chunk
       String jsonBody = JsonUtils.pojoToJson(pipelineIds);
+      String normalizedServerUrl =
+          serverUrl != null && serverUrl.endsWith("/")
+              ? serverUrl.substring(0, serverUrl.length() - 1)
+              : serverUrl;
 
       HttpRequest request =
           HttpRequest.newBuilder()
-              .uri(URI.create(serverUrl + COLLECTION_PATH + "bulk/deploy"))
+              .uri(URI.create(normalizedServerUrl + COLLECTION_PATH + "bulk/deploy"))
               .header("Authorization", "Bearer " + jwtToken)
               .header("Content-Type", "application/json")
               .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
@@ -1923,7 +2864,7 @@ public class OpenMetadataOperations implements Callable<Integer> {
     }
   }
 
-  private void parseConfig() throws Exception {
+  public void parseConfig() throws Exception {
     ObjectMapper objectMapper = Jackson.newObjectMapper();
     objectMapper.registerSubtypes(AuditExcludeFilterFactory.class, AuditOnlyFilterFactory.class);
     Validator validator = Validators.newValidator();
@@ -1958,6 +2899,15 @@ public class OpenMetadataOperations implements Callable<Integer> {
 
     jdbi = JdbiUtils.createAndSetupJDBI(dataSourceFactory);
 
+    // Initialize the MigrationValidationClient, used in the Settings Repository
+    MigrationValidationClient.initialize(jdbi.onDemand(MigrationDAO.class), config);
+    // Init repos
+    collectionDAO = jdbi.onDemand(CollectionDAO.class);
+    Entity.setJdbi(jdbi);
+    Entity.setCollectionDAO(collectionDAO);
+    Entity.setEntityRelationshipRepository(new EntityRelationshipRepository(collectionDAO));
+    Entity.setSystemRepository(new SystemRepository());
+
     searchRepository =
         SearchRepositoryFactory.createSearchRepository(
             config.getElasticSearchConfiguration(), config.getDataSourceFactory().getMaxSize());
@@ -1967,14 +2917,11 @@ public class OpenMetadataOperations implements Callable<Integer> {
         SecretsManagerFactory.createSecretsManager(
             config.getSecretsManagerConfiguration(), config.getClusterName());
 
-    collectionDAO = jdbi.onDemand(CollectionDAO.class);
     Entity.setSearchRepository(searchRepository);
-    Entity.setJdbi(jdbi);
-    Entity.setCollectionDAO(collectionDAO);
-    Entity.setSystemRepository(new SystemRepository());
     Entity.initializeRepositories(config, jdbi);
     ConnectionType connType = ConnectionType.from(config.getDataSourceFactory().getDriverClass());
     DatasourceConfig.initialize(connType.label);
+    OpenMetadataApplicationConfigHolder.initialize(config);
   }
 
   // This was before handled via flyway's clean command.
@@ -2022,6 +2969,8 @@ public class OpenMetadataOperations implements Callable<Integer> {
                     a lot of information from the users, such as descriptions, tags, etc.
                     """);
     String input = "";
+    // Scanner on System.in should not be closed as it would close System.in entirely
+    @SuppressWarnings("resource")
     Scanner scanner = new Scanner(System.in);
     while (!input.equals("DELETE")) {
       LOG.info("Enter QUIT to quit. If you still want to continue, please enter DELETE: ");
@@ -2076,7 +3025,6 @@ public class OpenMetadataOperations implements Callable<Integer> {
           }
           roleRepository.initializeEntity(role);
         }
-        teamRepository.initOrganization();
       } catch (Exception ex) {
         LOG.error("Failed to initialize organization due to ", ex);
         throw new RuntimeException(ex);
@@ -2084,6 +3032,7 @@ public class OpenMetadataOperations implements Callable<Integer> {
         rootLogger.setLevel(originalLevel);
       }
     }
+    teamRepository.initOrganization();
   }
 
   public static void printToAsciiTable(
@@ -2108,17 +3057,11 @@ public class OpenMetadataOperations implements Callable<Integer> {
       for (MigrationDAO.ServerChangeLog serverChangeLog : serverChangeLogs) {
         List<String> row = new ArrayList<>();
         if (serverChangeLog.getMetrics() != null) {
-          JsonObject metricsJson =
-              new Gson().fromJson(serverChangeLog.getMetrics(), JsonObject.class);
-          Set<String> keys = metricsJson.keySet();
-          columns.addAll(keys);
+          JsonNode metricsJson = new ObjectMapper().readTree(serverChangeLog.getMetrics());
+          metricsJson.fieldNames().forEachRemaining(columns::add);
           row.add(serverChangeLog.getVersion());
           row.add(serverChangeLog.getInstalledOn());
-          row.addAll(
-              metricsJson.entrySet().stream()
-                  .map(Map.Entry::getValue)
-                  .map(JsonElement::toString)
-                  .toList());
+          metricsJson.fields().forEachRemaining(entry -> row.add(entry.getValue().toString()));
           rows.add(row);
         }
       }

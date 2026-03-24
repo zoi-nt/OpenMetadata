@@ -20,7 +20,6 @@ export enum EntityTypeEndpoint {
   Dashboard = 'dashboards',
   DashboardService = 'services/dashboardServices',
   DataModel = 'dashboard/datamodels',
-  DataProduct = 'dataProducts',
   Database = 'databases',
   DatabaseSchema = 'databaseSchemas',
   DatabaseService = 'services/databaseServices',
@@ -41,6 +40,7 @@ export enum EntityTypeEndpoint {
   DriveService = 'services/driveServices',
   StoreProcedure = 'storedProcedures',
   Table = 'tables',
+  TableColumn = 'tableColumn',
   Teams = 'teams',
   TestSuites = 'dataQuality/testSuites',
   Topic = 'topics',
@@ -79,6 +79,7 @@ export enum ENTITY_PATH {
   'dataProducts' = 'dataProduct',
   'metrics' = 'metric',
   charts = 'chart',
+  'tableColumn' = 'tableColumn',
   dataProductsTab = 'dataProductsTab',
 }
 
@@ -88,6 +89,7 @@ export type ResponseDataType = {
   description: string;
   id: string;
   fullyQualifiedName: string;
+  version?: number;
 };
 export type TestCaseData = {
   parameterValues?: unknown[];
@@ -128,6 +130,7 @@ export interface EntityReference {
 
 export interface ServiceEntity {
   name: string;
+  displayName?: string;
   serviceType: string;
   connection: {
     config: Record<string, unknown>;

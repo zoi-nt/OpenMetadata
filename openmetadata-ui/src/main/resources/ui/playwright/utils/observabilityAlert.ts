@@ -35,16 +35,17 @@ import {
   waitForRecentEventsToFinishExecution,
 } from './alert';
 import { clickOutside, descriptionBox, redirectToHomePage } from './common';
-import { addMultiOwner, updateDescription } from './entity';
+import {
+  addMultiOwner,
+  updateDescription,
+  waitForAllLoadersToDisappear,
+} from './entity';
 import { addInternalDestination } from './notificationAlert';
 import { sidebarClick } from './sidebar';
 
 export const visitObservabilityAlertPage = async (page: Page) => {
   await redirectToHomePage(page);
-  await page.waitForLoadState('networkidle');
-  await page.waitForSelector('[data-testid="loader"]', {
-    state: 'detached',
-  });
+  await waitForAllLoadersToDisappear(page);
 
   // Set up the response promise before navigation
   const getAlerts = page.waitForResponse(
@@ -52,9 +53,7 @@ export const visitObservabilityAlertPage = async (page: Page) => {
   );
 
   // Set up navigation promise before clicking
-  const navigationPromise = page.waitForURL('**/observability/alerts', {
-    waitUntil: 'networkidle',
-  });
+  const navigationPromise = page.waitForURL('**/observability/alerts');
 
   await sidebarClick(page, SidebarItem.OBSERVABILITY_ALERT);
 
@@ -68,24 +67,33 @@ export const addExternalDestination = async ({
   category,
   secretKey,
   input = '',
+  advancedConfig,
 }: {
   page: Page;
   destinationNumber: number;
   category: string;
   input?: string;
   secretKey?: string;
+  advancedConfig?: {
+    secretKey?: string;
+    headers?: Array<{ key: string; value: string }>;
+    queryParams?: Array<{ key: string; value: string }>;
+  };
 }) => {
   // Select destination category
   await page.click(
     `[data-testid="destination-category-select-${destinationNumber}"]`
   );
 
-  await page.waitForSelector(`.ant-select-dropdown:visible`, {
+  await page.locator('.ant-select-dropdown:visible').first().waitFor({
     state: 'visible',
   });
-
   // Select external tab
-  await page.click(`[data-testid="tab-label-external"]:visible`);
+  const externalTab = page.locator(
+    `.ant-select-dropdown:visible [data-testid="destination-category-dropdown-${destinationNumber}"] [data-testid="tab-label-external"]`
+  );
+  await expect(externalTab).toBeVisible();
+  await externalTab.click();
 
   // Select destination category option
   await page.click(
@@ -113,6 +121,15 @@ export const addExternalDestination = async ({
       .getByText('Advanced Configuration')
       .click();
 
+    const authTypeSelect = page.getByTestId(
+      `auth-type-select-${destinationNumber}`
+    );
+    await expect(authTypeSelect).toBeVisible();
+    await authTypeSelect.click();
+    await page.click(
+      `.ant-select-dropdown:visible [title="Bearer (HMAC Signature)"]:visible`
+    );
+
     await expect(
       page.getByTestId(`secret-key-input-${destinationNumber}`)
     ).toBeVisible();
@@ -121,6 +138,69 @@ export const addExternalDestination = async ({
       `[data-testid="secret-key-input-${destinationNumber}"]`,
       secretKey
     );
+  }
+
+  if (advancedConfig) {
+    await page
+      .getByTestId(`destination-${destinationNumber}`)
+      .getByText('Advanced Configuration')
+      .click();
+
+    if (advancedConfig.secretKey) {
+      await expect(
+        page.getByTestId(`secret-key-input-${destinationNumber}`)
+      ).toBeVisible();
+
+      await page.fill(
+        `[data-testid="secret-key-input-${destinationNumber}"]`,
+        advancedConfig.secretKey
+      );
+    }
+
+    if (advancedConfig.headers) {
+      for (let i = 0; i < advancedConfig.headers.length; i++) {
+        const header = advancedConfig.headers[i];
+
+        await page
+          .getByTestId(`add-header-button-${destinationNumber}`)
+          .click();
+
+        await expect(page.getByTestId(`header-key-input-${i}`)).toBeVisible();
+        await expect(page.getByTestId(`header-value-input-${i}`)).toBeVisible();
+
+        await page.fill(`[data-testid="header-key-input-${i}"]`, header.key);
+        await page.fill(
+          `[data-testid="header-value-input-${i}"]`,
+          header.value
+        );
+      }
+    }
+
+    if (advancedConfig.queryParams) {
+      for (let i = 0; i < advancedConfig.queryParams.length; i++) {
+        const queryParam = advancedConfig.queryParams[i];
+
+        await page
+          .getByTestId(`add-query-param-button-${destinationNumber}`)
+          .click();
+
+        await expect(
+          page.getByTestId(`query-param-key-input-${i}`)
+        ).toBeVisible();
+        await expect(
+          page.getByTestId(`query-param-value-input-${i}`)
+        ).toBeVisible();
+
+        await page.fill(
+          `[data-testid="query-param-key-input-${i}"]`,
+          queryParam.key
+        );
+        await page.fill(
+          `[data-testid="query-param-value-input-${i}"]`,
+          queryParam.value
+        );
+      }
+    }
   }
 
   await clickOutside(page);
@@ -510,7 +590,7 @@ export const createCommonObservabilityAlert = async ({
       `[data-testid="${filter.inputSelector}"] [role="combobox"]`,
       filter.inputValue,
       {
-        force: true,
+        force: true, // eslint-disable-line playwright/no-force-option -- Ant Select overlay covers combobox input
       }
     );
 
@@ -547,13 +627,13 @@ export const createCommonObservabilityAlert = async ({
     await page.click(`[data-testid="trigger-select-${actionNumber}"]`);
 
     // Adding the dropdown visibility check to avoid flakiness here
-    await page.waitForSelector(`.ant-select-dropdown:visible`, {
+    await page.locator('.ant-select-dropdown:visible').first().waitFor({
       state: 'visible',
     });
     await page.click(
       `.ant-select-dropdown:visible [data-testid="${action.name}-filter-option"]:visible`
     );
-    await page.waitForSelector(`.ant-select-dropdown:visible`, {
+    await page.locator('.ant-select-dropdown:visible').first().waitFor({
       state: 'hidden',
     });
 
@@ -566,7 +646,7 @@ export const createCommonObservabilityAlert = async ({
           `[data-testid="${input.inputSelector}"] [role="combobox"]`,
           input.inputValue,
           {
-            force: true,
+            force: true, // eslint-disable-line playwright/no-force-option -- Ant Select overlay covers combobox input
           }
         );
         if (input.waitForAPI) {
@@ -574,7 +654,6 @@ export const createCommonObservabilityAlert = async ({
         }
         await page.click(`[title="${input.inputValue}"]:visible`);
 
-        // eslint-disable-next-line jest/no-conditional-expect
         await expect(page.getByTestId(input.inputSelector)).toHaveText(
           input.inputValue
         );

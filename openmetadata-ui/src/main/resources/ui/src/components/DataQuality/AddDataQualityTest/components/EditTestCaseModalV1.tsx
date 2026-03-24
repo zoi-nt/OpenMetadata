@@ -18,12 +18,13 @@ import {
   Form,
   FormProps,
   Input,
+  InputNumber,
   Select,
   Space,
 } from 'antd';
 import { AxiosError } from 'axios';
 import { compare } from 'fast-json-patch';
-import { isArray, isEmpty, isEqual, pick } from 'lodash';
+import { isArray, isEmpty, isEqual, isUndefined, pick } from 'lodash';
 import {
   FC,
   FocusEvent,
@@ -50,6 +51,7 @@ import {
   FieldTypes,
   FormItemLayout,
 } from '../../../../interface/FormUtils.interface';
+import { TableSearchSource } from '../../../../interface/search.interface';
 import testCaseClassBase from '../../../../pages/IncidentManager/IncidentManagerDetailPage/TestCaseClassBase';
 import { getTableDetailsByFQN } from '../../../../rest/tableAPI';
 import {
@@ -305,6 +307,7 @@ const EditTestCaseModalV1: FC<EditTestCaseModalProps> = ({
             ...(value.glossaryTerms ?? []),
           ],
       dimensionColumns: value.dimensionColumns || undefined,
+      topDimensions: value.topDimensions ?? undefined,
     };
 
     const jsonPatch = compare(testCase, updatedTestCase);
@@ -357,6 +360,13 @@ const EditTestCaseModalV1: FC<EditTestCaseModalProps> = ({
         };
       }
 
+      if (param?.dataType === TestDataType.Boolean) {
+        return {
+          ...acc,
+          [curr.name || '']: curr.value === 'true',
+        };
+      }
+
       return {
         ...acc,
         [curr.name || '']: curr.value,
@@ -401,6 +411,7 @@ const EditTestCaseModalV1: FC<EditTestCaseModalProps> = ({
         'computePassedFailedRowCount',
         'useDynamicAssertion',
         'dimensionColumns',
+        'topDimensions',
       ]);
 
       form.setFieldsValue({
@@ -470,7 +481,7 @@ const EditTestCaseModalV1: FC<EditTestCaseModalProps> = ({
           {errorMessage && (
             <div className="floating-error-alert">
               <AlertBar
-                defafultExpand
+                defaultExpand
                 className="h-full custom-alert-description"
                 message={errorMessage}
                 type="error"
@@ -506,6 +517,19 @@ const EditTestCaseModalV1: FC<EditTestCaseModalProps> = ({
                       id="root/dimensionColumns"
                       mode="multiple"
                       options={dimensionColumnOptions}
+                    />
+                  </Form.Item>
+                )}
+                {isColumn && (
+                  <Form.Item
+                    label={t('label.top-dimension-plural')}
+                    name="topDimensions">
+                    <InputNumber
+                      className="w-full"
+                      id="root/topDimensions"
+                      max={50}
+                      min={1}
+                      placeholder="5"
                     />
                   </Form.Item>
                 )}
@@ -620,7 +644,14 @@ const EditTestCaseModalV1: FC<EditTestCaseModalProps> = ({
         <div className="drawer-doc-panel service-doc-panel markdown-parser">
           <ServiceDocPanel
             activeField={activeField}
-            selectedEntity={table}
+            selectedEntity={
+              isUndefined(table)
+                ? undefined
+                : ({
+                    ...table,
+                    entityType: EntityType.TABLE,
+                  } as TableSearchSource)
+            }
             serviceName={TEST_CASE_FORM}
             serviceType={OPEN_METADATA as ServiceCategory}
           />

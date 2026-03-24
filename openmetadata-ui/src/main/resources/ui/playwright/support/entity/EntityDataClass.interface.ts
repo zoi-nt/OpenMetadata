@@ -51,6 +51,7 @@ export type EntityType =
   | 'dashboardDataModel'
   | 'pipeline'
   | 'topic'
-  | 'mlmodel'
+  | 'MlModel'
   | 'container'
-  | 'searchIndex';
+  | 'searchIndex'
+  | 'tableColumn';

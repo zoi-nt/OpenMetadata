@@ -39,6 +39,7 @@ import org.openmetadata.service.Entity;
 import org.openmetadata.service.jdbi3.EntityRepository;
 import org.openmetadata.service.jdbi3.EntityTimeSeriesRepository;
 import org.openmetadata.service.jdbi3.ListFilter;
+import org.openmetadata.service.util.FullyQualifiedName;
 
 @Slf4j
 public class ReindexingUtil {
@@ -47,7 +48,6 @@ public class ReindexingUtil {
   }
 
   public static final String ENTITY_TYPE_KEY = "entityType";
-  public static final String ENTITY_NAME_LIST_KEY = "entityNameList";
   public static final String TIMESTAMP_KEY = "@timestamp";
   public static final String TARGET_INDEX_KEY = "targetIndex";
   public static final String RECREATE_CONTEXT = "recreateContext";
@@ -55,6 +55,14 @@ public class ReindexingUtil {
   public static void getUpdatedStats(StepStats stats, int currentSuccess, int currentFailed) {
     stats.setSuccessRecords(stats.getSuccessRecords() + currentSuccess);
     stats.setFailedRecords(stats.getFailedRecords() + currentFailed);
+  }
+
+  public static void getUpdatedStats(
+      StepStats stats, int currentSuccess, int currentFailed, int currentWarnings) {
+    stats.setSuccessRecords(stats.getSuccessRecords() + currentSuccess);
+    stats.setFailedRecords(stats.getFailedRecords() + currentFailed);
+    stats.setWarningRecords(
+        (stats.getWarningRecords() != null ? stats.getWarningRecords() : 0) + currentWarnings);
   }
 
   public static boolean isDataInsightIndex(String entityType) {
@@ -78,7 +86,7 @@ public class ReindexingUtil {
           EntityTimeSeriesRepository<?> repository;
           ListFilter listFilter = new ListFilter(null);
           if (isDataInsightIndex(entityType)) {
-            listFilter.addQueryParam("entityFQNHash", entityType);
+            listFilter.addQueryParam("entityFQNHash", FullyQualifiedName.buildHash(entityType));
             repository = Entity.getEntityTimeSeriesRepository(Entity.ENTITY_REPORT_DATA);
           } else {
             repository = Entity.getEntityTimeSeriesRepository(entityType);

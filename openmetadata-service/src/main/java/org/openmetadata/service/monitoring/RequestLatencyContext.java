@@ -1,123 +1,123 @@
 package org.openmetadata.service.monitoring;
 
-import static org.openmetadata.service.monitoring.MetricUtils.normalizeUri;
-
-import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.Timer;
 import java.time.Duration;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
 /**
  * Thread-local context for tracking request latencies using Micrometer.
- * This provides accurate latency measurements including percentiles.
+ *
+ * <p>This context can be shared across multiple worker threads using {@link #setContext} or {@link
+ * #wrapWithContext} for operations like bulk processing. Database, search, auth, and RDF time
+ * tracking uses atomic operations and aggregates correctly across threads.
  */
-@Slf4j
+@Slf4j(topic = "org.openmetadata.slowrequest")
 public class RequestLatencyContext {
+
   private static final String ENDPOINT = "endpoint";
   private static final String METHOD = "method";
+  private static final String SLOW_REQUEST_THRESHOLD_PROPERTY = "requestLatencyThresholdMs";
+  private static final long DEFAULT_SLOW_REQUEST_THRESHOLD_MS = 1000L;
   private static final ThreadLocal<RequestContext> requestContext = new ThreadLocal<>();
+  private static final ThreadLocal<Deque<ActivePhase>> phaseStack =
+      ThreadLocal.withInitial(ArrayDeque::new);
 
-  // Request-level timers
   private static final ConcurrentHashMap<String, Timer> requestTimers = new ConcurrentHashMap<>();
-
-  // Component-level timers
   private static final ConcurrentHashMap<String, Timer> databaseTimers = new ConcurrentHashMap<>();
   private static final ConcurrentHashMap<String, Timer> searchTimers = new ConcurrentHashMap<>();
-  private static final ConcurrentHashMap<String, Timer> internalTimers = new ConcurrentHashMap<>();
+  private static final ConcurrentHashMap<String, Timer> authTimers = new ConcurrentHashMap<>();
+  private static final ConcurrentHashMap<String, Timer> rdfTimers = new ConcurrentHashMap<>();
+  private static final ConcurrentHashMap<String, Timer> serverTimers = new ConcurrentHashMap<>();
 
-  // Percentage tracking - using AtomicReference to hold percentage values per endpoint
-  private static final ConcurrentHashMap<String, PercentageHolder> percentageHolders =
-      new ConcurrentHashMap<>();
-
-  // Dummy timer for measuring elapsed time without recording
+  private static final io.micrometer.core.instrument.MeterRegistry NOOP_REGISTRY =
+      new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
   private static final Timer DUMMY_TIMER =
-      Timer.builder("dummy.timer").register(Metrics.globalRegistry);
+      Timer.builder("internal.sample.stop").register(NOOP_REGISTRY);
+  private static final long slowRequestThresholdNanos = resolveSlowRequestThresholdNanos();
 
-  /**
-   * Holder class for percentage values that can be updated atomically
-   */
-  private static class PercentageHolder {
-    final AtomicReference<Double> databasePercent = new AtomicReference<>(0.0);
-    final AtomicReference<Double> searchPercent = new AtomicReference<>(0.0);
-    final AtomicReference<Double> internalPercent = new AtomicReference<>(0.0);
+  private static long resolveSlowRequestThresholdNanos() {
+    String configuredThreshold = System.getProperty(SLOW_REQUEST_THRESHOLD_PROPERTY);
+    if (configuredThreshold == null || configuredThreshold.isBlank()) {
+      return DEFAULT_SLOW_REQUEST_THRESHOLD_MS * 1_000_000L;
+    }
+
+    try {
+      long thresholdMs = Long.parseLong(configuredThreshold.trim());
+      if (thresholdMs < 0) {
+        LOG.warn(
+            "Ignoring negative request latency threshold '{}={}', using default {}ms",
+            SLOW_REQUEST_THRESHOLD_PROPERTY,
+            configuredThreshold,
+            DEFAULT_SLOW_REQUEST_THRESHOLD_MS);
+        return DEFAULT_SLOW_REQUEST_THRESHOLD_MS * 1_000_000L;
+      }
+      return thresholdMs * 1_000_000L;
+    } catch (NumberFormatException ex) {
+      LOG.warn(
+          "Invalid request latency threshold '{}={}', using default {}ms",
+          SLOW_REQUEST_THRESHOLD_PROPERTY,
+          configuredThreshold,
+          DEFAULT_SLOW_REQUEST_THRESHOLD_MS);
+      return DEFAULT_SLOW_REQUEST_THRESHOLD_MS * 1_000_000L;
+    }
   }
 
-  /**
-   * Start tracking a new request
-   */
-  public static void startRequest(String endpoint, String method) {
-    // Normalize method to uppercase to ensure consistency
+  public static void startRequest(String endpoint, String method, String uriPath) {
     String normalizedMethod = method.toUpperCase();
-    RequestContext context = new RequestContext(endpoint, normalizedMethod);
+    RequestContext context = new RequestContext(endpoint, normalizedMethod, uriPath);
     requestContext.set(context);
-    String normalizedEndpoint = normalizeUri(endpoint);
-    String timerKey = normalizedEndpoint + "|" + normalizedMethod;
-    Timer timer =
-        requestTimers.computeIfAbsent(
-            timerKey,
-            k ->
-                Timer.builder("request.latency.total")
-                    .tag(ENDPOINT, normalizedEndpoint)
-                    .tag(METHOD, normalizedMethod)
-                    .description("Total request latency")
-                    .publishPercentileHistogram(true)
-                    .minimumExpectedValue(Duration.ofMillis(1))
-                    .maximumExpectedValue(Duration.ofSeconds(60))
-                    .serviceLevelObjectives(
-                        Duration.ofMillis(10),
-                        Duration.ofMillis(50),
-                        Duration.ofMillis(100),
-                        Duration.ofMillis(200),
-                        Duration.ofMillis(500),
-                        Duration.ofSeconds(1),
-                        Duration.ofSeconds(2),
-                        Duration.ofSeconds(5),
-                        Duration.ofSeconds(10))
-                    .register(Metrics.globalRegistry));
-    LOG.debug(
-        "Created/retrieved timer for endpoint: {}, method: {}, timer: {}",
-        normalizedEndpoint,
-        normalizedMethod,
-        timer);
+    String timerKey = endpoint + "|" + normalizedMethod;
+    requestTimers.computeIfAbsent(
+        timerKey,
+        k ->
+            Timer.builder("request.latency.total")
+                .tag(ENDPOINT, endpoint)
+                .tag(METHOD, normalizedMethod)
+                .description("Total request latency")
+                .serviceLevelObjectives(
+                    Duration.ofMillis(100),
+                    Duration.ofMillis(500),
+                    Duration.ofSeconds(1),
+                    Duration.ofSeconds(5),
+                    Duration.ofSeconds(10))
+                .register(Metrics.globalRegistry));
     context.requestTimerSample = Timer.start(Metrics.globalRegistry);
-    context.internalTimerStartNanos = System.nanoTime();
+    context.internalTimerStartNanos.set(System.nanoTime());
   }
 
-  /**
-   * Start timing a database operation
-   */
+  public static void startRequest(String endpoint, String method) {
+    startRequest(endpoint, method, null);
+  }
+
   public static Timer.Sample startDatabaseOperation() {
     RequestContext context = requestContext.get();
     if (context == null) {
       return null;
     }
-
-    if (context.internalTimerStartNanos > 0) {
-      context.internalTime += System.nanoTime() - context.internalTimerStartNanos;
-      context.internalTimerStartNanos = 0;
+    long internalStart = context.internalTimerStartNanos.getAndSet(0);
+    if (internalStart > 0) {
+      context.serverTime.addAndGet(System.nanoTime() - internalStart);
     }
-
-    context.dbOperationCount++;
+    context.dbOperationCount.incrementAndGet();
     return Timer.start(Metrics.globalRegistry);
   }
 
   public static void endDatabaseOperation(Timer.Sample timerSample) {
     if (timerSample == null) return;
-
     RequestContext context = requestContext.get();
-    if (context == null) {
-      return;
-    }
-
-    // Use the shared dummy timer to measure elapsed time without recording
+    if (context == null) return;
     long duration = timerSample.stop(DUMMY_TIMER);
-    context.dbTime += duration;
-
-    context.internalTimerStartNanos = System.nanoTime();
+    context.dbTime.addAndGet(duration);
+    context.internalTimerStartNanos.set(System.nanoTime());
   }
 
   public static Timer.Sample startSearchOperation() {
@@ -125,230 +125,391 @@ public class RequestLatencyContext {
     if (context == null) {
       return null;
     }
-    if (context.internalTimerStartNanos > 0) {
-      context.internalTime += System.nanoTime() - context.internalTimerStartNanos;
-      context.internalTimerStartNanos = 0;
+    long internalStart = context.internalTimerStartNanos.getAndSet(0);
+    if (internalStart > 0) {
+      context.serverTime.addAndGet(System.nanoTime() - internalStart);
     }
-
-    context.searchOperationCount++;
+    context.searchOperationCount.incrementAndGet();
     return Timer.start(Metrics.globalRegistry);
   }
 
   public static void endSearchOperation(Timer.Sample timerSample) {
     if (timerSample == null) return;
+    RequestContext context = requestContext.get();
+    if (context == null) return;
+    long duration = timerSample.stop(DUMMY_TIMER);
+    context.searchTime.addAndGet(duration);
+    context.internalTimerStartNanos.set(System.nanoTime());
+  }
 
+  public static Timer.Sample startAuthOperation() {
     RequestContext context = requestContext.get();
     if (context == null) {
-      return;
+      return null;
+    }
+    long internalStart = context.internalTimerStartNanos.getAndSet(0);
+    if (internalStart > 0) {
+      context.serverTime.addAndGet(System.nanoTime() - internalStart);
+    }
+    context.authOperationCount.incrementAndGet();
+    return Timer.start(Metrics.globalRegistry);
+  }
+
+  public static void endAuthOperation(Timer.Sample timerSample) {
+    if (timerSample == null) return;
+    RequestContext context = requestContext.get();
+    if (context == null) return;
+    long duration = timerSample.stop(DUMMY_TIMER);
+    context.authTime.addAndGet(duration);
+    context.internalTimerStartNanos.set(System.nanoTime());
+  }
+
+  public static Timer.Sample startRdfOperation() {
+    RequestContext context = requestContext.get();
+    if (context == null) {
+      return null;
+    }
+    long internalStart = context.internalTimerStartNanos.getAndSet(0);
+    if (internalStart > 0) {
+      context.serverTime.addAndGet(System.nanoTime() - internalStart);
+    }
+    context.rdfOperationCount.incrementAndGet();
+    return Timer.start(Metrics.globalRegistry);
+  }
+
+  public static void endRdfOperation(Timer.Sample timerSample) {
+    if (timerSample == null) return;
+    RequestContext context = requestContext.get();
+    if (context == null) return;
+    long duration = timerSample.stop(DUMMY_TIMER);
+    context.rdfTime.addAndGet(duration);
+    context.internalTimerStartNanos.set(System.nanoTime());
+  }
+
+  public static void trackJsonDeserialize(int jsonLength) {
+    RequestContext context = requestContext.get();
+    if (context == null) return;
+    context.jsonBytesDeserialized.addAndGet(jsonLength);
+    context.jsonDeserializeCount.incrementAndGet();
+  }
+
+  public static Phase phase(String name) {
+    RequestContext context = requestContext.get();
+    if (context == null) {
+      return Phase.NOOP;
+    }
+    return new Phase(name, context);
+  }
+
+  public static class Phase implements AutoCloseable {
+    static final Phase NOOP = new Phase(null, null);
+
+    private final String name;
+    private final RequestContext context;
+    private final ActivePhase activePhase;
+
+    private Phase(String name, RequestContext context) {
+      this.name = name;
+      this.context = context;
+      if (context != null) {
+        this.activePhase = new ActivePhase(System.nanoTime(), context.dbTime.get());
+        phaseStack.get().push(this.activePhase);
+      } else {
+        this.activePhase = null;
+      }
     }
 
-    // Use the shared dummy timer to measure elapsed time without recording
-    long duration = timerSample.stop(DUMMY_TIMER);
-    context.searchTime += duration;
+    @Override
+    public void close() {
+      if (context == null || activePhase == null) {
+        return;
+      }
 
-    // Resume internal timer
-    context.internalTimerStartNanos = System.nanoTime();
+      Deque<ActivePhase> stack = phaseStack.get();
+      ActivePhase top = stack.peek();
+      if (top == activePhase) {
+        stack.pop();
+      } else {
+        // Defensive: handle out-of-order close without throwing.
+        if (!stack.remove(activePhase)) {
+          return;
+        }
+      }
+
+      long elapsed = System.nanoTime() - activePhase.startNanos;
+      long exclusive = elapsed - activePhase.childNanos;
+      if (exclusive < 0) {
+        exclusive = 0;
+      }
+
+      long dbInPhase = context.dbTime.get() - activePhase.dbTimeAtStartNanos;
+      long exclusiveDb = dbInPhase - activePhase.childDbNanos;
+      if (exclusiveDb < 0) {
+        exclusiveDb = 0;
+      }
+
+      context.phaseTime.computeIfAbsent(name, k -> new AtomicLong(0)).addAndGet(elapsed);
+      context.phaseExclusiveTime.computeIfAbsent(name, k -> new AtomicLong(0)).addAndGet(exclusive);
+      if (exclusiveDb > 0) {
+        context.phaseDbTime.computeIfAbsent(name, k -> new AtomicLong(0)).addAndGet(exclusiveDb);
+      }
+
+      ActivePhase parent = stack.peek();
+      if (parent != null) {
+        parent.childNanos += elapsed;
+        parent.childDbNanos += dbInPhase;
+      } else if (stack.isEmpty()) {
+        phaseStack.remove();
+      }
+    }
   }
 
   public static void endRequest() {
     RequestContext context = requestContext.get();
     if (context == null) return;
 
-    String normalizedEndpoint = normalizeUri(context.endpoint);
-    String timerKey = normalizedEndpoint + "|" + context.method;
+    String timerKey = context.endpoint + "|" + context.method;
     try {
-      // Stop request timer
       if (context.requestTimerSample != null) {
         Timer requestTimer = requestTimers.get(timerKey);
         if (requestTimer != null) {
           context.totalTime = context.requestTimerSample.stop(requestTimer);
-        } else {
-          LOG.warn(
-              "Request timer not found for endpoint: {}, method: {}, timerKey: {}, available keys: {}",
-              normalizedEndpoint,
-              context.method,
-              timerKey,
-              requestTimers.keySet());
         }
       }
 
-      if (context.internalTimerStartNanos > 0) {
-        context.internalTime += System.nanoTime() - context.internalTimerStartNanos;
+      long finalInternalStart = context.internalTimerStartNanos.get();
+      if (finalInternalStart > 0) {
+        context.serverTime.addAndGet(System.nanoTime() - finalInternalStart);
       }
 
-      // Record per-request timers (not per-operation)
-      // This gives us the total DB time for THIS request
+      long dbTimeNanos = context.dbTime.get();
+      long searchTimeNanos = context.searchTime.get();
+      long authTimeNanos = context.authTime.get();
+      long rdfTimeNanos = context.rdfTime.get();
+      long serverTimeNanos = context.serverTime.get();
+      int dbOps = context.dbOperationCount.get();
+
       Timer dbTimer =
           databaseTimers.computeIfAbsent(
               timerKey,
               k ->
                   Timer.builder("request.latency.database")
-                      .tag(ENDPOINT, normalizedEndpoint)
+                      .tag(ENDPOINT, context.endpoint)
                       .tag(METHOD, context.method)
-                      .description("Total database latency per request")
-                      .publishPercentileHistogram(true)
-                      .minimumExpectedValue(Duration.ofMillis(1))
-                      .maximumExpectedValue(Duration.ofSeconds(30))
-                      .serviceLevelObjectives(
-                          Duration.ofMillis(5),
-                          Duration.ofMillis(10),
-                          Duration.ofMillis(25),
-                          Duration.ofMillis(50),
-                          Duration.ofMillis(100),
-                          Duration.ofMillis(250),
-                          Duration.ofMillis(500),
-                          Duration.ofSeconds(1),
-                          Duration.ofSeconds(2))
                       .register(Metrics.globalRegistry));
-      if (context.dbTime > 0) {
-        dbTimer.record(context.dbTime, java.util.concurrent.TimeUnit.NANOSECONDS);
+      if (dbTimeNanos > 0) {
+        dbTimer.record(dbTimeNanos, java.util.concurrent.TimeUnit.NANOSECONDS);
       }
 
-      // Record total search time for THIS request
       Timer searchTimer =
           searchTimers.computeIfAbsent(
               timerKey,
               k ->
                   Timer.builder("request.latency.search")
-                      .tag(ENDPOINT, normalizedEndpoint)
+                      .tag(ENDPOINT, context.endpoint)
                       .tag(METHOD, context.method)
-                      .description("Total search latency per request")
-                      .publishPercentileHistogram(true)
-                      .minimumExpectedValue(Duration.ofMillis(1))
-                      .maximumExpectedValue(Duration.ofSeconds(30))
-                      .serviceLevelObjectives(
-                          Duration.ofMillis(5),
-                          Duration.ofMillis(10),
-                          Duration.ofMillis(25),
-                          Duration.ofMillis(50),
-                          Duration.ofMillis(100),
-                          Duration.ofMillis(250),
-                          Duration.ofMillis(500),
-                          Duration.ofSeconds(1),
-                          Duration.ofSeconds(2))
                       .register(Metrics.globalRegistry));
-      if (context.searchTime > 0) {
-        searchTimer.record(context.searchTime, java.util.concurrent.TimeUnit.NANOSECONDS);
+      if (searchTimeNanos > 0) {
+        searchTimer.record(searchTimeNanos, java.util.concurrent.TimeUnit.NANOSECONDS);
       }
 
-      // Record internal processing time for THIS request
-      Timer internalTimer =
-          internalTimers.computeIfAbsent(
+      Timer authTimer =
+          authTimers.computeIfAbsent(
               timerKey,
               k ->
-                  Timer.builder("request.latency.internal")
-                      .tag(ENDPOINT, normalizedEndpoint)
+                  Timer.builder("request.latency.auth")
+                      .tag(ENDPOINT, context.endpoint)
                       .tag(METHOD, context.method)
-                      .description("Internal processing latency per request")
-                      .publishPercentileHistogram(true)
-                      .minimumExpectedValue(Duration.ofMillis(1))
-                      .maximumExpectedValue(Duration.ofSeconds(10))
-                      .serviceLevelObjectives(
-                          Duration.ofMillis(1),
-                          Duration.ofMillis(5),
-                          Duration.ofMillis(10),
-                          Duration.ofMillis(25),
-                          Duration.ofMillis(50),
-                          Duration.ofMillis(100),
-                          Duration.ofMillis(250),
-                          Duration.ofMillis(500),
-                          Duration.ofSeconds(1))
                       .register(Metrics.globalRegistry));
-      if (context.internalTime > 0) {
-        internalTimer.record(context.internalTime, java.util.concurrent.TimeUnit.NANOSECONDS);
+      if (authTimeNanos > 0) {
+        authTimer.record(authTimeNanos, java.util.concurrent.TimeUnit.NANOSECONDS);
       }
 
-      // Record operation counts as distribution summaries to get avg/max/percentiles
-      if (context.dbOperationCount > 0) {
-        Metrics.summary(
-                "request.operations.database", ENDPOINT, normalizedEndpoint, METHOD, context.method)
-            .record(context.dbOperationCount);
-      }
-
-      if (context.searchOperationCount > 0) {
-        Metrics.summary(
-                "request.operations.search", ENDPOINT, normalizedEndpoint, METHOD, context.method)
-            .record(context.searchOperationCount);
-      }
-
-      if (context.totalTime > 0) {
-        long totalNanos = context.totalTime;
-        double dbPercent = (context.dbTime * 100.0) / totalNanos;
-        double searchPercent = (context.searchTime * 100.0) / totalNanos;
-        double internalPercent = (context.internalTime * 100.0) / totalNanos;
-
-        // Get or create percentage holder for this endpoint and method
-        PercentageHolder holder =
-            percentageHolders.computeIfAbsent(
-                timerKey,
-                k -> {
-                  PercentageHolder newHolder = new PercentageHolder();
-
-                  // Register gauges that read from the atomic references
-                  Gauge.builder("request.percentage.database", newHolder.databasePercent::get)
-                      .tag(ENDPOINT, normalizedEndpoint)
+      Timer rdfTimer =
+          rdfTimers.computeIfAbsent(
+              timerKey,
+              k ->
+                  Timer.builder("request.latency.rdf")
+                      .tag(ENDPOINT, context.endpoint)
                       .tag(METHOD, context.method)
-                      .description("Percentage of request time spent in database operations")
-                      .register(Metrics.globalRegistry);
-
-                  Gauge.builder("request.percentage.search", newHolder.searchPercent::get)
-                      .tag(ENDPOINT, normalizedEndpoint)
-                      .tag(METHOD, context.method)
-                      .description("Percentage of request time spent in search operations")
-                      .register(Metrics.globalRegistry);
-
-                  Gauge.builder("request.percentage.internal", newHolder.internalPercent::get)
-                      .tag(ENDPOINT, normalizedEndpoint)
-                      .tag(METHOD, context.method)
-                      .description("Percentage of request time spent in internal processing")
-                      .register(Metrics.globalRegistry);
-
-                  return newHolder;
-                });
-
-        // Update the percentage values
-        holder.databasePercent.set(dbPercent);
-        holder.searchPercent.set(searchPercent);
-        holder.internalPercent.set(internalPercent);
+                      .register(Metrics.globalRegistry));
+      if (rdfTimeNanos > 0) {
+        rdfTimer.record(rdfTimeNanos, java.util.concurrent.TimeUnit.NANOSECONDS);
       }
 
-      // Log slow requests (over 1 second)
-      if (context.totalTime > 1_000_000_000L) {
+      Timer serverTimer =
+          serverTimers.computeIfAbsent(
+              timerKey,
+              k ->
+                  Timer.builder("request.latency.server")
+                      .tag(ENDPOINT, context.endpoint)
+                      .tag(METHOD, context.method)
+                      .register(Metrics.globalRegistry));
+      if (serverTimeNanos > 0) {
+        serverTimer.record(serverTimeNanos, java.util.concurrent.TimeUnit.NANOSECONDS);
+      }
+
+      if (context.totalTime > slowRequestThresholdNanos) {
+        String path = context.uriPath != null ? context.uriPath : context.endpoint;
+        String phaseBreakdown = formatPhaseBreakdown(context.phaseTime);
+        String phaseExclusiveBreakdown =
+            formatPhaseBreakdown("phaseExclusive", context.phaseExclusiveTime);
+        String phaseDbBreakdown = formatPhaseBreakdown("phaseDb", context.phaseDbTime);
+        long phaseExclusiveNanos =
+            context.phaseExclusiveTime.values().stream().mapToLong(AtomicLong::get).sum();
+        long unphasedServerNanos = Math.max(0L, serverTimeNanos - phaseExclusiveNanos);
+        long jsonKB = context.jsonBytesDeserialized.get() / 1024;
+        int jsonOps = context.jsonDeserializeCount.get();
         LOG.warn(
-            "Slow request detected - endpoint: {}, total: {}ms, db: {}ms ({}%), search: {}ms ({}%), internal: {}ms ({}%)",
-            context.endpoint,
+            "Slow request - {} {}, total: {}ms, db: {}ms, search: {}ms, auth: {}ms, rdf: {}ms,"
+                + " server: {}ms, dbOps: {}, searchOps: {}, rdfOps: {}, jsonKB: {}, jsonOps:"
+                + " {}{}, unphasedServer: {}ms{}{}",
+            context.method,
+            path,
             context.totalTime / 1_000_000,
-            context.dbTime / 1_000_000,
-            (context.dbTime * 100) / context.totalTime,
-            context.searchTime / 1_000_000,
-            (context.searchTime * 100) / context.totalTime,
-            context.internalTime / 1_000_000,
-            (context.internalTime * 100) / context.totalTime);
+            dbTimeNanos / 1_000_000,
+            searchTimeNanos / 1_000_000,
+            authTimeNanos / 1_000_000,
+            rdfTimeNanos / 1_000_000,
+            serverTimeNanos / 1_000_000,
+            dbOps,
+            context.searchOperationCount.get(),
+            context.rdfOperationCount.get(),
+            jsonKB,
+            jsonOps,
+            phaseBreakdown,
+            unphasedServerNanos / 1_000_000,
+            phaseExclusiveBreakdown,
+            phaseDbBreakdown);
       }
 
     } finally {
+      phaseStack.remove();
       requestContext.remove();
     }
   }
 
+  private static String formatPhaseBreakdown(ConcurrentHashMap<String, AtomicLong> phaseTime) {
+    return formatPhaseBreakdown("phases", phaseTime);
+  }
+
+  private static String formatPhaseBreakdown(
+      String label, ConcurrentHashMap<String, AtomicLong> phaseTime) {
+    if (phaseTime.isEmpty()) {
+      return "";
+    }
+    String phases =
+        phaseTime.entrySet().stream()
+            .sorted((a, b) -> Long.compare(b.getValue().get(), a.getValue().get()))
+            .map(e -> e.getKey() + ": " + (e.getValue().get() / 1_000_000) + "ms")
+            .collect(Collectors.joining(", "));
+    return ", " + label + ": {" + phases + "}";
+  }
+
+  public static RequestContext getContext() {
+    return requestContext.get();
+  }
+
+  public static void setContext(RequestContext context) {
+    if (context != null) {
+      requestContext.set(context);
+    }
+  }
+
+  public static void clearContext() {
+    phaseStack.remove();
+    requestContext.remove();
+  }
+
+  private static final class ActivePhase {
+    private final long startNanos;
+    private final long dbTimeAtStartNanos;
+    // Phase state is thread-confined via phaseStack ThreadLocal and never propagated cross-thread.
+    private long childNanos;
+    private long childDbNanos;
+
+    private ActivePhase(long startNanos, long dbTimeAtStartNanos) {
+      this.startNanos = startNanos;
+      this.dbTimeAtStartNanos = dbTimeAtStartNanos;
+      this.childNanos = 0;
+      this.childDbNanos = 0;
+    }
+  }
+
+  public static Runnable wrapWithContext(Runnable task) {
+    RequestContext ctx = getContext();
+    if (ctx == null) return task;
+    return () -> {
+      // Intentionally propagate only request counters, not phaseStack hierarchy.
+      phaseStack.remove();
+      setContext(ctx);
+      try {
+        task.run();
+      } finally {
+        clearContext();
+      }
+    };
+  }
+
+  public static <T> Supplier<T> wrapWithContext(Supplier<T> task) {
+    RequestContext ctx = getContext();
+    if (ctx == null) return task;
+    return () -> {
+      // Intentionally propagate only request counters, not phaseStack hierarchy.
+      phaseStack.remove();
+      setContext(ctx);
+      try {
+        return task.get();
+      } finally {
+        clearContext();
+      }
+    };
+  }
+
+  public static void reset() {
+    requestContext.remove();
+    requestTimers.clear();
+    databaseTimers.clear();
+    searchTimers.clear();
+    authTimers.clear();
+    rdfTimers.clear();
+    serverTimers.clear();
+  }
+
   @Getter
-  private static class RequestContext {
+  public static class RequestContext {
     final String endpoint;
     final String method;
-    Timer.Sample requestTimerSample;
-    long internalTimerStartNanos = 0;
+    final String uriPath;
+    volatile Timer.Sample requestTimerSample;
+    final AtomicLong internalTimerStartNanos = new AtomicLong(0);
 
-    long totalTime = 0;
-    long dbTime = 0;
-    long searchTime = 0;
-    long internalTime = 0;
+    volatile long totalTime = 0;
+    final AtomicLong dbTime = new AtomicLong(0);
+    final AtomicLong searchTime = new AtomicLong(0);
+    final AtomicLong authTime = new AtomicLong(0);
+    final AtomicLong rdfTime = new AtomicLong(0);
+    final AtomicLong serverTime = new AtomicLong(0);
 
-    int dbOperationCount = 0;
-    int searchOperationCount = 0;
+    final AtomicInteger dbOperationCount = new AtomicInteger(0);
+    final AtomicInteger searchOperationCount = new AtomicInteger(0);
+    final AtomicInteger authOperationCount = new AtomicInteger(0);
+    final AtomicInteger rdfOperationCount = new AtomicInteger(0);
+    final AtomicLong jsonBytesDeserialized = new AtomicLong(0);
+    final AtomicInteger jsonDeserializeCount = new AtomicInteger(0);
 
-    RequestContext(String endpoint, String method) {
+    final ConcurrentHashMap<String, AtomicLong> phaseTime = new ConcurrentHashMap<>();
+    final ConcurrentHashMap<String, AtomicLong> phaseExclusiveTime = new ConcurrentHashMap<>();
+    final ConcurrentHashMap<String, AtomicLong> phaseDbTime = new ConcurrentHashMap<>();
+
+    RequestContext(String endpoint, String method, String uriPath) {
       this.endpoint = endpoint;
       this.method = method;
+      this.uriPath = uriPath;
+    }
+
+    RequestContext(String endpoint, String method) {
+      this(endpoint, method, null);
     }
   }
 }

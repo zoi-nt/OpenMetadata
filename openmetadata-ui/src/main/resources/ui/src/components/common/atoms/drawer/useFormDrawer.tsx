@@ -11,8 +11,10 @@
  *  limitations under the License.
  */
 
-import React, { ReactNode, useCallback, useState } from 'react';
+import classNames from 'classnames';
+import React, { ReactNode, useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { createScrollToErrorHandler } from '../../../../utils/formUtils';
 import {
   CompositeDrawerConfig,
   useCompositeDrawer,
@@ -108,21 +110,22 @@ export const useFormDrawer = <T,>(config: FormDrawerConfig<T>) => {
       ...header,
     },
     body: {
+      ...body,
       children: form,
       loading: loading || isSubmitting,
-      ...body,
+      className: classNames('drawer-form-content', body?.className),
     },
     footer: {
       align: footerAlign,
       secondaryButton: {
         label: cancelLabel,
-        variant: 'text',
+        color: 'tertiary',
         testId: cancelTestId,
         onClick: () => closeRef.current(),
       },
       primaryButton: {
         label: submitLabel,
-        variant: 'contained',
+        color: 'primary',
         testId: submitTestId,
         loading: loading || isSubmitting,
         disabled: loading || isSubmitting,
@@ -131,7 +134,7 @@ export const useFormDrawer = <T,>(config: FormDrawerConfig<T>) => {
             setIsSubmitting(true);
             await onSubmit({} as T);
             // Don't close drawer here - let consumer handle it after successful API call
-          } catch (error) {
+          } catch {
             // Form submission error handled by caller
           } finally {
             setIsSubmitting(false);
@@ -183,11 +186,18 @@ export const useFormDrawerWithRef = <T,>(
 ) => {
   const { formRef, onSubmit, ...restConfig } = config;
 
+  const scrollToError = useMemo(() => createScrollToErrorHandler(), []);
+
   const handleSubmit = useCallback(async () => {
     if (formRef?.validateFields) {
-      // Validate first
-      const values = await formRef.validateFields();
-      // If validation passes, submit the form
+      let values: T;
+      try {
+        values = await formRef.validateFields();
+      } catch {
+        scrollToError();
+
+        return;
+      }
       if (formRef?.submit) {
         formRef.submit();
       } else {
@@ -198,7 +208,7 @@ export const useFormDrawerWithRef = <T,>(
     } else {
       await onSubmit({} as T);
     }
-  }, [formRef, onSubmit]);
+  }, [formRef, onSubmit, scrollToError]);
 
   const drawer = useFormDrawer({
     ...restConfig,

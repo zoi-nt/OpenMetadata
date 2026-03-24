@@ -17,7 +17,8 @@ import time
 import traceback
 from collections import defaultdict
 from functools import singledispatchmethod
-from typing import Any, Generic, Iterable, List, Type, TypeVar
+from time import perf_counter
+from typing import Any, Generic, Iterable, List, Optional, Type, TypeVar
 
 from pydantic import BaseModel
 
@@ -25,6 +26,9 @@ from metadata.generated.schema.api.lineage.addLineage import AddLineageRequest
 from metadata.generated.schema.entity.data.database import Database
 from metadata.generated.schema.entity.data.databaseSchema import DatabaseSchema
 from metadata.generated.schema.entity.data.storedProcedure import StoredProcedure
+from metadata.generated.schema.entity.services.ingestionPipelines.status import (
+    StackTraceError,
+)
 from metadata.ingestion.api.models import Either, Entity
 from metadata.ingestion.models.custom_properties import OMetaCustomProperties
 from metadata.ingestion.models.ometa_classification import OMetaTagAndClassification
@@ -43,6 +47,8 @@ from metadata.ingestion.ometa.utils import model_str
 from metadata.utils.custom_thread_pool import CustomThreadPoolExecutor
 from metadata.utils.execution_time_tracker import ExecutionTimeTrackerContextMap
 from metadata.utils.logger import ingestion_logger
+from metadata.utils.operation_metrics import OperationMetricsState
+from metadata.utils.progress_tracker import ProgressTrackerState
 from metadata.utils.source_hash import generate_source_hash
 
 logger = ingestion_logger()
@@ -69,7 +75,21 @@ class TopologyRunnerMixin(Generic[C]):
 
     # The cache will have the shape {`child_stage.type_`: {`name`: `hash`}}
     cache = defaultdict(dict)
+
+    # The deleted will have the shape {`child_stage.type_`: {`name`: `hash`}}
+    # and will keep track of entities which were deleted and are being restored
+    deleted = defaultdict(dict)
     queue = Queue()
+
+    def _get_entity_type_for_node(self, node: TopologyNode) -> Optional[str]:
+        """
+        Get the entity type name for a topology node.
+        Used for progress tracking by entity type.
+        """
+        for stage in node.stages:
+            if stage.type_:
+                return stage.type_.__name__
+        return None
 
     def _run_node_producer(self, node: TopologyNode) -> Iterable[Entity]:
         """Run the node producer"""
@@ -77,17 +97,39 @@ class TopologyRunnerMixin(Generic[C]):
             node_producer = getattr(self, node.producer)
             yield from node_producer() or []
         except Exception as exc:
-            logger.debug(traceback.format_exc())
-            logger.error(f"Error running node producer: {exc}")
+            self.status.failed(
+                StackTraceError(
+                    name=f"Producer {node.producer}",
+                    error=f"Error running node producer: {exc}",
+                    stackTrace=traceback.format_exc(),
+                )
+            )
 
     def _multithread_process_node(
         self, node: TopologyNode, threads: int
     ) -> Iterable[Entity]:
-        """Multithread Processing of a Node"""
+        """Multithread Processing of a Node with progress tracking"""
         child_nodes = self._get_child_nodes(node)
+        entity_type_name = self._get_entity_type_for_node(node)
+        progress_tracker = ProgressTrackerState()
+        operation_metrics = OperationMetricsState()
 
+        # Track SOURCE time - fetching entities from producer
+        source_start = perf_counter()
         node_entities = list(self._run_node_producer(node) or [])
+        source_time_ms = (perf_counter() - source_start) * 1000
         node_entities_length = len(node_entities)
+
+        if entity_type_name:
+            operation_metrics.record_operation(
+                category="source_fetch",
+                operation=node.producer,
+                duration_ms=source_time_ms,
+                entity_type=entity_type_name,
+            )
+
+        if entity_type_name and node_entities_length > 0:
+            progress_tracker.set_total(entity_type_name, node_entities_length)
 
         if node_entities_length == 0:
             return
@@ -106,6 +148,7 @@ class TopologyRunnerMixin(Generic[C]):
                         chunk,
                         child_nodes,
                         self.context.get_current_thread_id(),
+                        entity_type_name,
                     )
                     for chunk in chunks
                 ]
@@ -126,10 +169,26 @@ class TopologyRunnerMixin(Generic[C]):
                     time.sleep(0.01)
 
     def _process_node(self, node: TopologyNode) -> Iterable[Entity]:
-        """Processing of a Node in a single thread."""
+        """Processing of a Node in a single thread with progress tracking.
+
+        Uses lazy iteration to preserve the producer contract where connectors
+        set up state (e.g., database inspectors, session tags) before each yield.
+        Eager materialization with list() would break 12+ database connectors
+        (Postgres, Snowflake, Redshift, etc.) that rely on this pattern.
+
+        Progress totals are tracked incrementally via add_to_total. For nodes
+        needing upfront totals (e.g., tables), _multithread_process_node is used.
+        """
         child_nodes = self._get_child_nodes(node)
+        entity_type_name = self._get_entity_type_for_node(node)
+        progress_tracker = ProgressTrackerState()
 
         for node_entity in self._run_node_producer(node) or []:
+            start_time = perf_counter()
+
+            if entity_type_name:
+                progress_tracker.add_to_total(entity_type_name, 1)
+
             for stage in node.stages:
                 yield from self._process_stage(
                     stage=stage, node_entity=node_entity, child_nodes=child_nodes
@@ -139,6 +198,10 @@ class TopologyRunnerMixin(Generic[C]):
             for stage in node.stages:
                 if stage.clear_context:
                     self.context.get().clear_stage(stage=stage)
+
+            if entity_type_name:
+                processing_time = perf_counter() - start_time
+                progress_tracker.increment_processed(entity_type_name, processing_time)
 
             # process all children from the node being run
             yield from self.process_nodes(child_nodes)
@@ -188,13 +251,19 @@ class TopologyRunnerMixin(Generic[C]):
         node_entities: List[Any],
         child_nodes: List[TopologyNode],
         parent_thread_id: int,
+        entity_type_name: Optional[str] = None,
     ):
-        """Multithread processing of a Node Entity"""
+        """Multithread processing of a Node Entity with progress tracking"""
         # Generates a new context based on the parent thread.
         self.context.copy_from(parent_thread_id)
         ExecutionTimeTrackerContextMap().copy_from_parent(parent_thread_id)
 
+        progress_tracker = ProgressTrackerState()
+        operation_metrics = OperationMetricsState()
+
         for node_entity in node_entities:
+            start_time = perf_counter()
+
             # For each stage, we get all the stage results and one by one yield them by adding them to the Queue.
             for stage in node.stages:
                 for stage_result in self._process_stage(
@@ -207,10 +276,17 @@ class TopologyRunnerMixin(Generic[C]):
                 if stage.clear_context:
                     self.context.get().clear_stage(stage=stage)
 
+            if entity_type_name:
+                processing_time = perf_counter() - start_time
+                progress_tracker.increment_processed(entity_type_name, processing_time)
+
             # If the Entity has child nodes that need processing we proceed to processing them with the same logic as above.
 
             for child_result in self.process_nodes(child_nodes):
                 self.queue.put(child_result)
+
+        # Merge thread-local metrics into global state before thread exits
+        operation_metrics.merge_thread_metrics()
 
         # Finally we pop the context and finish the thread
         self.context.pop()
@@ -246,6 +322,8 @@ class TopologyRunnerMixin(Generic[C]):
         and decide if we need to PUT or PATCH at the sink.
         """
         logger.debug(f"Processing stage: {stage}")
+        operation_metrics = OperationMetricsState()
+        stage_start = perf_counter()
 
         for entity_request in (
             self._run_stage_processor(stage=stage, node_entity=node_entity) or []
@@ -262,6 +340,16 @@ class TopologyRunnerMixin(Generic[C]):
         if stage.cache_entities:
             self._init_cache_dict(stage=stage, child_nodes=child_nodes)
 
+        # Track STAGE time - processing and sinking entities
+        stage_time_ms = (perf_counter() - stage_start) * 1000
+        entity_type_name = stage.type_.__name__ if stage.type_ else "Unknown"
+        operation_metrics.record_operation(
+            category="stage_process",
+            operation=stage.processor,
+            duration_ms=stage_time_ms,
+            entity_type=entity_type_name,
+        )
+
     def _run_node_post_process(self, node: TopologyNode) -> Iterable[Entity]:
         """
         If the node has post_process steps, iterate over them and yield the result
@@ -274,9 +362,12 @@ class TopologyRunnerMixin(Generic[C]):
                     for entity_request in node_post_process() or []:
                         yield entity_request
                 except Exception as exc:
-                    logger.debug(traceback.format_exc())
-                    logger.warning(
-                        f"Could not run Post Process `{process}` due to [{exc}]"
+                    self.status.failed(
+                        StackTraceError(
+                            name=f"Post Process {process}",
+                            error=f"Error running node post process: {exc}",
+                            stackTrace=traceback.format_exc(),
+                        )
                     )
 
     def _init_cache_dict(
@@ -315,13 +406,15 @@ class TopologyRunnerMixin(Generic[C]):
         else:
             params = {"service": entity_fqn}
         entities_list = self.metadata.list_all_entities(
-            entity=child_type,
-            params=params,
-            fields=["sourceHash"],
+            entity=child_type, params=params, fields=["sourceHash"], include="all"
         )
         for entity in entities_list:
             if entity.sourceHash:
                 self.cache[child_type][
+                    model_str(entity.fullyQualifiedName)
+                ] = entity.sourceHash
+            if entity.deleted:
+                self.deleted[child_type][
                     model_str(entity.fullyQualifiedName)
                 ] = entity.sourceHash
 
@@ -392,17 +485,48 @@ class TopologyRunnerMixin(Generic[C]):
         if entity is None and stage.use_cache:
             # check if we find the entity in the entities list
             entity_source_hash = self.cache[stage.type_].get(entity_fqn)
+            is_deleted = entity_fqn in self.deleted[stage.type_]
+
+            # if the entity was deleted, restore it first
+            if is_deleted:
+                entity = self.metadata.get_by_name(
+                    entity=stage.type_, fqn=entity_fqn, fields=["*"], include="all"
+                )
+                if entity:
+                    logger.debug(
+                        f"Restoring deleted {str(stage.type_.__name__)} '{entity_fqn}'"
+                    )
+                    restored_entity = self.metadata.restore(
+                        entity=stage.type_, entity_id=entity.id
+                    )
+                    if restored_entity:
+                        self.deleted[stage.type_].pop(entity_fqn, None)
+                        # after restore, check if we need to patch for changes
+                        if (
+                            entity_source_hash != create_entity_request_hash
+                            or self.source_config.overrideMetadata
+                        ):
+                            patch_entity = self.create_patch_request(
+                                original_entity=restored_entity,
+                                create_request=entity_request.right,
+                            )
+                            entity_request.right = patch_entity
+                        else:
+                            # entity restored with same hash, skip update
+                            same_fingerprint = True
+                    else:
+                        logger.warning(
+                            f"Failed to restore deleted {str(stage.type_.__name__)} '{entity_fqn}'"
+                        )
             # if the source hash is not present or different from new hash, update the entity
             # if overrideMetadata is true, we will always update the entity
-            if (
+            elif (
                 entity_source_hash != create_entity_request_hash
                 or self.source_config.overrideMetadata
             ):
                 # the entity has changed, get the entity from server and make a patch request
                 entity = self.metadata.get_by_name(
-                    entity=stage.type_,
-                    fqn=entity_fqn,
-                    fields=["*"],
+                    entity=stage.type_, fqn=entity_fqn, fields=["*"]
                 )
 
                 # we return the entity for a patch update

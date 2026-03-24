@@ -10,7 +10,7 @@
  *  See the License for the specific language governing permissions and
  *  limitations under the License.
  */
-import { expect, Page, test as base } from '@playwright/test';
+import { test as base, expect, Page } from '@playwright/test';
 import { PolicyClass } from '../../support/access-control/PoliciesClass';
 import { RolesClass } from '../../support/access-control/RolesClass';
 import { Domain } from '../../support/domain/Domain';
@@ -20,12 +20,7 @@ import { TagClass } from '../../support/tag/TagClass';
 import { TeamClass } from '../../support/team/TeamClass';
 import { UserClass } from '../../support/user/UserClass';
 import { performAdminLogin } from '../../utils/admin';
-import {
-  descriptionBox,
-  getApiContext,
-  redirectToHomePage,
-  uuid,
-} from '../../utils/common';
+import { getApiContext, redirectToHomePage, uuid } from '../../utils/common';
 import { addMultiOwner, removeOwner } from '../../utils/entity';
 import {
   addAssetsToTag,
@@ -38,9 +33,14 @@ import {
   submitForm,
   validateForm,
   verifyCertificationTagPageUI,
+  verifyEntityTypeFilterInTagAssets,
   verifyTagPageUI,
 } from '../../utils/tag';
 import { visitUserProfilePage } from '../../utils/user';
+import { sidebarClick } from '../../utils/sidebar';
+import { SidebarItem } from '../../constant/sidebar';
+
+base.describe.configure({ mode: 'serial' });
 
 const adminUser = new UserClass();
 const dataConsumerUser = new UserClass();
@@ -167,37 +167,21 @@ test.describe('Tag Page with Admin Roles', () => {
 
     await expect(adminPage.getByRole('dialog')).toBeVisible();
 
-    await adminPage.getByTestId('color-color-input').fill('#6366f1');
+    await adminPage.getByTestId('icon-picker-btn').click();
+    await adminPage.getByRole('button', { name: `Select icon Cube01` }).click();
+    await adminPage
+      .getByRole('button', { name: 'Select color #F14C75' })
+      .click();
 
     const updateColor = adminPage.waitForResponse(`/api/v1/tags/*`);
     await adminPage.locator('button[type="submit"]').click();
     await updateColor;
 
-    await adminPage.waitForLoadState('networkidle');
-
     await expect(adminPage.getByText(tag.data.name)).toBeVisible();
   });
 
   test('Edit Tag Description', async ({ adminPage }) => {
-    await redirectToHomePage(adminPage);
-    await tag.visitPage(adminPage);
-
-    await adminPage.getByTestId('edit-description').click();
-
-    await expect(adminPage.getByRole('dialog')).toBeVisible();
-
-    await adminPage.locator(descriptionBox).clear();
-    await adminPage
-      .locator(descriptionBox)
-      .fill(`This is updated test description for tag ${tag.data.name}.`);
-
-    const editDescription = adminPage.waitForResponse(`/api/v1/tags/*`);
-    await adminPage.getByTestId('save').click();
-    await editDescription;
-
-    await expect(adminPage.getByTestId('viewer-container')).toContainText(
-      `This is updated test description for tag ${tag.data.name}.`
-    );
+    await editTagPageDescription(adminPage, tag);
   });
 
   test('Delete a Tag', async ({ adminPage }) => {
@@ -232,6 +216,10 @@ test.describe('Tag Page with Admin Roles', () => {
       await addAssetsToTag(adminPage, assets, tag1);
     });
 
+    await test.step('Verify EntityType Filter', async () => {
+      await verifyEntityTypeFilterInTagAssets(adminPage, assets);
+    });
+
     await test.step('Delete Asset', async () => {
       await removeAssetsFromTag(adminPage, assets, tag1);
       await assetCleanup();
@@ -239,34 +227,55 @@ test.describe('Tag Page with Admin Roles', () => {
   });
 
   test('Create tag with domain', async ({ adminPage }) => {
-    await classification.visitPage(adminPage);
-
-    await adminPage.reload();
-    await adminPage.click(`text=${classification.data.displayName}`);
-
-    await expect(adminPage.locator('.activeCategory')).toContainText(
-      classification.data.displayName
+    await redirectToHomePage(adminPage);
+    await adminPage.goto(
+      `/tags/${encodeURIComponent(
+        classification.responseData.fullyQualifiedName ??
+          classification.responseData.name
+      )}`
     );
+    await adminPage
+      .getByTestId('tags-container')
+      .getByTestId('loader')
+      .first()
+      .waitFor({
+        state: 'detached',
+      });
 
-    await adminPage.click('[data-testid="add-new-tag-button"]');
+    await expect(adminPage.getByTestId('add-new-tag-button')).toBeVisible();
 
-    await adminPage.waitForSelector('.ant-modal-content', {
-      state: 'visible',
-    });
+    await adminPage.getByTestId('add-new-tag-button').click();
 
-    await expect(adminPage.locator('.ant-modal-content')).toBeVisible();
+    await expect(adminPage.getByTestId('tags-form')).toBeVisible();
 
     await validateForm(adminPage);
 
     await fillTagForm(adminPage, domain);
 
-    const createTagResponse = adminPage.waitForResponse('api/v1/tags');
+    const createTagResponse = adminPage.waitForResponse(
+      (response) =>
+        response.url().includes('/api/v1/tags') &&
+        response.request().method() === 'POST' &&
+        response.ok()
+    );
 
     await submitForm(adminPage);
 
-    await createTagResponse;
+    const createdTagResponse = await createTagResponse;
+    const createdTagData = await createdTagResponse.json();
 
-    await adminPage.click(`[data-testid=${NEW_TAG.name}]`);
+    await adminPage.goto(
+      `/tag/${encodeURIComponent(
+        createdTagData.fullyQualifiedName ?? NEW_TAG.name
+      )}`
+    );
+    await adminPage
+      .getByTestId('tags-container')
+      .getByTestId('loader')
+      .first()
+      .waitFor({
+        state: 'detached',
+      });
 
     await expect(adminPage.getByTestId('domain-link')).toContainText(
       domain.data.displayName
@@ -289,7 +298,6 @@ test.describe('Tag Page with Admin Roles', () => {
 
     // Verify in My Data page
     await visitUserProfilePage(adminPage, user1.responseData.name);
-    await adminPage.waitForLoadState('networkidle');
 
     const myDataRes = adminPage.waitForResponse(
       `/api/v1/search/query?q=*&index=all&*`
@@ -312,6 +320,137 @@ test.describe('Tag Page with Admin Roles', () => {
       type: 'Users',
       dataTestId: 'owner-link',
     });
+  });
+
+  test('Verify tag enable/disable toggle', async ({ adminPage }) => {
+    await classification1.visitPage(adminPage);
+
+    const tagToggle = adminPage.getByTestId(
+      `tag-disable-toggle-${tag1.data.name}`
+    );
+
+    // Verify initial state using role locator separately
+    const switchInput = tagToggle.getByRole('switch');
+
+    await expect(switchInput).toBeVisible();
+    await expect(switchInput).toBeChecked();
+
+    // Disable
+    await Promise.all([
+      adminPage.waitForResponse(
+        (response) =>
+          response.request().method() === 'PATCH' &&
+          response.url().includes('/api/v1/tags/')
+      ),
+      tagToggle.click(), // <-- click wrapper, NOT hidden input
+    ]);
+
+    await expect(switchInput).not.toBeChecked();
+
+    // Enable
+    await Promise.all([
+      adminPage.waitForResponse(
+        (response) =>
+          response.request().method() === 'PATCH' &&
+          response.url().includes('/api/v1/tags/')
+      ),
+      tagToggle.click(),
+    ]);
+
+    await expect(switchInput).toBeChecked();
+  });
+
+  test('Tag toggle should be disabled when classification is disabled', async ({
+    adminPage,
+  }) => {
+    const tagToggleTestId = `tag-disable-toggle-${tag1.data.name}`;
+
+    const openClassification = async () => {
+      await redirectToHomePage(adminPage);
+      await sidebarClick(adminPage, SidebarItem.TAGS);
+      await adminPage
+        .locator(
+          '[data-testid="tags-container"] .table-container [data-testid="loader"]'
+        )
+        .waitFor({ state: 'detached' });
+
+      const classificationEntry = adminPage
+        .locator('[data-testid="side-panel-classification"]')
+        .getByText(classification1.responseData.displayName, {
+          exact: true,
+        })
+        .first();
+      await expect(classificationEntry).toBeVisible({ timeout: 30000 });
+      await classificationEntry.click();
+      await expect(adminPage.locator('.activeCategory')).toContainText(
+        classification1.responseData.displayName
+      );
+    };
+
+    await openClassification();
+
+    const tagToggle = adminPage
+      .getByTestId(tagToggleTestId)
+      .getByRole('switch');
+
+    // Verify toggle is enabled when classification is enabled
+    await expect(tagToggle).toBeVisible({ timeout: 60000 });
+    await expect(tagToggle).toBeEnabled();
+
+    const { apiContext, afterAction } = await getApiContext(adminPage);
+    try {
+      await apiContext.patch(
+        `/api/v1/classifications/${classification1.responseData.id}`,
+        {
+          data: [
+            {
+              op: 'replace',
+              path: '/disabled',
+              value: true,
+            },
+          ],
+          headers: {
+            'Content-Type': 'application/json-patch+json',
+          },
+        }
+      );
+
+      await adminPage.reload();
+      await adminPage
+        .locator(
+          '[data-testid="tags-container"] .table-container [data-testid="loader"]'
+        )
+        .waitFor({ state: 'detached' });
+      await expect(tagToggle).toBeVisible({ timeout: 60000 });
+      await expect(tagToggle).toBeDisabled();
+
+      await apiContext.patch(
+        `/api/v1/classifications/${classification1.responseData.id}`,
+        {
+          data: [
+            {
+              op: 'replace',
+              path: '/disabled',
+              value: false,
+            },
+          ],
+          headers: {
+            'Content-Type': 'application/json-patch+json',
+          },
+        }
+      );
+
+      await adminPage.reload();
+      await adminPage
+        .locator(
+          '[data-testid="tags-container"] .table-container [data-testid="loader"]'
+        )
+        .waitFor({ state: 'detached' });
+      await expect(tagToggle).toBeVisible({ timeout: 60000 });
+      await expect(tagToggle).toBeEnabled();
+    } finally {
+      await afterAction();
+    }
   });
 });
 
@@ -365,10 +504,28 @@ test.describe('Tag Page with Data Consumer Roles', () => {
       await addAssetsToTag(dataConsumerPage, assets, tag);
     });
 
+    await test.step('Verify EntityType Filter', async () => {
+      await verifyEntityTypeFilterInTagAssets(dataConsumerPage, assets);
+    });
+
     await test.step('Delete Asset', async () => {
       await removeAssetsFromTag(dataConsumerPage, assets, tag);
       await assetCleanup();
     });
+  });
+
+  test('Tag toggle should be disabled for user without EditAll permission', async ({
+    dataConsumerPage,
+  }) => {
+    await classification.visitPage(dataConsumerPage);
+
+    // Verify toggle is visible but disabled for data consumer user (no EditAll permission)
+    const tagToggle = dataConsumerPage
+      .getByTestId(`tag-disable-toggle-${tag.data.name}`)
+      .getByRole('switch');
+
+    await expect(tagToggle).toBeVisible();
+    await expect(tagToggle).toBeDisabled();
   });
 });
 
@@ -413,6 +570,10 @@ test.describe('Tag Page with Data Steward Roles', () => {
 
     await test.step('Add Asset ', async () => {
       await addAssetsToTag(dataStewardPage, assets, tag);
+    });
+
+    await test.step('Verify EntityType Filter', async () => {
+      await verifyEntityTypeFilterInTagAssets(dataStewardPage, assets);
     });
 
     await test.step('Delete Asset', async () => {

@@ -19,6 +19,7 @@ import { Link } from 'react-router-dom';
 import { SearchedDataProps } from '../../src/components/SearchedData/SearchedData.interface';
 import { ReactComponent as IconExternalLink } from '../assets/svg/external-links.svg';
 import { GenericProvider } from '../components/Customization/GenericProvider/GenericProvider';
+import { ColumnOrTask } from '../components/Database/ColumnDetailPanel/ColumnDetailPanel.interface';
 import SchemaEditor from '../components/Database/SchemaEditor/SchemaEditor';
 import APIEndpointSummary from '../components/Explore/EntitySummaryPanel/APIEndpointSummary/APIEndpointSummary';
 import { ColumnSummaryList } from '../components/Explore/EntitySummaryPanel/ColumnSummaryList/ColumnsSummaryList';
@@ -61,6 +62,7 @@ import { Field, Topic } from '../generated/entity/data/topic';
 import { DataProduct } from '../generated/entity/domains/dataProduct';
 import { Domain } from '../generated/entity/domains/domain';
 import { EntityReference } from '../generated/tests/testCase';
+import { EntityData } from '../pages/TasksPage/TasksPage.interface';
 import entityUtilClassBase from './EntityUtilClassBase';
 import { getEntityName } from './EntityUtils';
 import { t } from './i18next/LocalUtil';
@@ -566,6 +568,7 @@ export const getEntityChildDetails = (
 
       break;
     case EntityType.API_ENDPOINT:
+    case EntityType.API_SERVICE:
       return (
         <APIEndpointSummary
           entityDetails={entityInfo as APIEndpoint}
@@ -639,13 +642,6 @@ export const getEntityChildDetails = (
           isLoading={false}
         />
       );
-    case EntityType.API_SERVICE:
-      return (
-        <APIEndpointSummary
-          entityDetails={entityInfo as APIEndpoint}
-          highlights={highlights}
-        />
-      );
     case EntityType.GLOSSARY_TERM:
     case EntityType.GLOSSARY:
       return (
@@ -685,4 +681,35 @@ export const getEntityChildDetails = (
       <Col span={24}>{childComponent}</Col>
     </Row>
   );
+};
+
+/**
+ * Convert ColumnOrTask to EntityData for CustomPropertiesSection
+ * @param column - Column or task-like entity
+ * @returns EntityData object with extension property if available, or undefined
+ */
+export const toEntityData = (
+  column: ColumnOrTask | null
+): EntityData | undefined => {
+  if (!column) {
+    return undefined;
+  }
+
+  // Check if column has extension property and create a new object that satisfies EntityData
+  // extension is typed as 'any' in entity interfaces, but EntityData.extension expects Record<string, unknown>
+  // so we cast it after runtime validation to ensure type safety
+  const extension =
+    'extension' in column &&
+    typeof column.extension === 'object' &&
+    column.extension !== null
+      ? column.extension
+      : undefined;
+
+  // Create an object that satisfies EntityData interface with index signature
+  const entityData: EntityData = {} as EntityData;
+  if (extension) {
+    entityData.extension = extension;
+  }
+
+  return entityData;
 };

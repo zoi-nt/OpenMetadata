@@ -50,12 +50,17 @@ import { performAdminLogin } from '../../utils/admin';
 import {
   assignDataProduct,
   assignDomain,
+  clickOutside,
   descriptionBoxReadOnly,
   redirectToHomePage,
   toastNotification,
 } from '../../utils/common';
 import { DATA_ASSET_RULES } from '../../utils/dataAssetRules';
-import { addMultiOwner, assignGlossaryTerm } from '../../utils/entity';
+import {
+  addMultiOwner,
+  assignGlossaryTerm,
+  waitForAllLoadersToDisappear,
+} from '../../utils/entity';
 import {
   createDatabaseRowDetails,
   createDatabaseSchemaRowDetails,
@@ -190,25 +195,30 @@ test.describe(
           page.locator("[data-testid='select-owner-tabs']")
         ).toBeVisible();
 
-        await page.waitForSelector(
-          '[data-testid="select-owner-tabs"] [data-testid="loader"]',
-          { state: 'detached' }
-        );
+        await page
+          .getByTestId('select-owner-tabs')
+          .getByTestId('loader')
+          .waitFor({ state: 'detached' });
 
         await page
           .locator("[data-testid='select-owner-tabs']")
           .getByRole('tab', { name: 'Teams' })
           .click();
 
-        await page.waitForSelector(
-          '[data-testid="select-owner-tabs"] [data-testid="loader"]',
-          { state: 'detached' }
+        await page
+          .getByTestId('select-owner-tabs')
+          .getByTestId('loader')
+          .waitFor({ state: 'detached' });
+
+        const teamsSearchBar = page.getByTestId(
+          'owner-select-teams-search-bar'
         );
+        await teamsSearchBar.waitFor({ state: 'visible' });
 
         const searchUser = page.waitForResponse(
           `/api/v1/search/query?q=*${encodeURIComponent(teamName)}*`
         );
-        await page.getByTestId(`owner-select-teams-search-bar`).fill(teamName);
+        await teamsSearchBar.fill(teamName);
         await searchUser;
 
         const ownerItem = page.getByRole('listitem', {
@@ -261,8 +271,18 @@ test.describe(
         }
 
         // Add Multiple GlossaryTerm to Table
-        await assignGlossaryTerm(page, glossaryTerm.responseData);
-        await assignGlossaryTerm(page, glossaryTerm2.responseData, 'Edit');
+        await assignGlossaryTerm(
+          page,
+          glossaryTerm.responseData,
+          'Add',
+          entity.endpoint
+        );
+        await assignGlossaryTerm(
+          page,
+          glossaryTerm2.responseData,
+          'Edit',
+          entity.endpoint
+        );
       });
     }
   }
@@ -318,9 +338,7 @@ test.describe(
         );
         await page.click('[data-testid="bulk-edit-table"]');
 
-        await page.waitForSelector('[data-testid="loader"]', {
-          state: 'detached',
-        });
+        await waitForAllLoadersToDisappear(page);
 
         // Adding some assertion to make sure that CSV loaded correctly
         await expect(page.locator('.rdg-header-row')).toBeVisible();
@@ -329,8 +347,11 @@ test.describe(
           page.getByRole('button', { name: 'Previous' })
         ).not.toBeVisible();
 
-        // Adding manual wait for the file to load
-        await page.waitForTimeout(500);
+        // Wait for grid cells to be ready for interaction
+        await page
+          .locator('.rdg-cell[role="gridcell"]')
+          .first()
+          .waitFor({ state: 'visible' });
 
         // Click on first cell and edit
 
@@ -347,7 +368,10 @@ test.describe(
             retentionPeriod: undefined,
             sourceUrl: undefined,
           },
-          page
+          page,
+          undefined,
+          undefined,
+          true
         );
 
         await page.getByRole('button', { name: 'Next' }).click();
@@ -372,8 +396,6 @@ test.describe(
         await toastNotification(page, /details updated successfully/);
 
         await page.click('[data-testid="databases"]');
-
-        await page.waitForLoadState('networkidle');
 
         // Verify Details updated
         await expect(page.getByTestId('column-name')).toHaveText(
@@ -447,9 +469,7 @@ test.describe(
 
         await page.click('[data-testid="bulk-edit-table"]');
 
-        await page.waitForSelector('[data-testid="loader"]', {
-          state: 'detached',
-        });
+        await waitForAllLoadersToDisappear(page);
 
         // Adding some assertion to make sure that CSV loaded correctly
         await expect(page.locator('.rdg-header-row')).toBeVisible();
@@ -458,8 +478,11 @@ test.describe(
           page.getByRole('button', { name: 'Previous' })
         ).not.toBeVisible();
 
-        // Adding manual wait for the file to load
-        await page.waitForTimeout(500);
+        // Wait for grid cells to be ready for interaction
+        await page
+          .locator('.rdg-cell[role="gridcell"]')
+          .first()
+          .waitFor({ state: 'visible' });
 
         // click on last row first cell
         await page.click('.rdg-cell[role="gridcell"]');
@@ -476,7 +499,10 @@ test.describe(
             teamOwners: [team.responseData?.['displayName']],
             domains: domain.responseData,
           },
-          page
+          page,
+          undefined,
+          undefined,
+          true
         );
 
         await page.getByRole('button', { name: 'Next' }).click();
@@ -492,7 +518,7 @@ test.describe(
           failed: '0',
         });
 
-        await page.waitForSelector('.rdg-header-row', {
+        await page.locator('.rdg-header-row').waitFor({
           state: 'visible',
         });
         const updateButtonResponse = page.waitForResponse(
@@ -530,8 +556,7 @@ test.describe(
 
         await page.getByTestId('column-display-name').click();
 
-        await page.waitForLoadState('networkidle');
-        await page.waitForSelector('loader', { state: 'hidden' });
+        await page.locator('loader').waitFor({ state: 'hidden' });
 
         // Verify Tags
         await expect(
@@ -596,8 +621,11 @@ test.describe(
           page.getByRole('button', { name: 'Previous' })
         ).not.toBeVisible();
 
-        // Adding manual wait for the file to load
-        await page.waitForTimeout(500);
+        // Wait for grid cells to be ready for interaction
+        await page
+          .locator('.rdg-cell[role="gridcell"]')
+          .first()
+          .waitFor({ state: 'visible' });
 
         // Click on first cell and edit
         await page.click('.rdg-cell[role="gridcell"]');
@@ -612,7 +640,10 @@ test.describe(
             teamOwners: [team.responseData?.['displayName']],
             domains: domain.responseData,
           },
-          page
+          page,
+          undefined,
+          undefined,
+          true
         );
 
         await page.getByRole('button', { name: 'Next' }).click();
@@ -645,8 +676,7 @@ test.describe(
           .getByTestId('column-display-name')
           .getByTestId(table.entity.name)
           .click();
-        await page.waitForLoadState('networkidle');
-        await page.waitForSelector('loader', { state: 'hidden' });
+        await page.locator('loader').waitFor({ state: 'hidden' });
 
         // Verify Domain
         await expect(page.getByTestId('domain-link')).toContainText(
@@ -688,6 +718,87 @@ test.describe(
 
       await table.delete(apiContext);
       await afterAction();
+    });
+  }
+);
+
+test.describe(
+  `GlossaryTerm Domain Entity Rules Disabled`,
+  {
+    tag: '@dataAssetRules',
+  },
+  () => {
+    // Verify glossary term allows multiple domains when entity rules are disabled
+    test('should allow multiple domain selection for glossary term when entity rules are disabled', async ({
+      page,
+      browser,
+    }) => {
+      test.slow(true);
+      const { apiContext, afterAction } = await performAdminLogin(browser);
+      const testDomain1 = new Domain();
+      const testDomain2 = new Domain();
+      const testGlossary = new Glossary();
+      const testGlossaryTerm = new GlossaryTerm(testGlossary);
+
+      try {
+        await testDomain1.create(apiContext);
+        await testDomain2.create(apiContext);
+        await testGlossary.create(apiContext);
+        await testGlossaryTerm.create(apiContext);
+
+        // Navigate to glossary term page with full page load
+        await page.goto(
+          `/glossary/${encodeURIComponent(
+            testGlossaryTerm.responseData.fullyQualifiedName
+          )}`
+        );
+
+        // Wait for page to be fully loaded
+        await page.waitForLoadState('domcontentloaded');
+        await waitForAllLoadersToDisappear(page);
+
+        // Open domain selector to verify multi-select mode (checkboxes visible)
+        await page.getByTestId('add-domain').click();
+        await waitForAllLoadersToDisappear(page);
+
+        // Verify checkboxes ARE visible (multi-select mode)
+        await expect(
+          page.locator('.domain-selectable-tree .ant-tree-checkbox').first()
+        ).toBeVisible();
+
+        // Close the selector by clicking outside
+        await clickOutside(page);
+
+        // Wait for domain selector to be fully closed
+        await page.getByTestId('domain-selectable-tree').waitFor({
+          state: 'detached',
+        });
+
+        // Assign first domain (multi-select mode)
+        await assignDomain(page, testDomain1.responseData);
+
+        // Assign second domain (should ADD to first, not replace)
+        await assignDomain(page, testDomain2.responseData, false);
+
+        // Verify both domains are visible (multi-select mode allows multiple)
+        // Use filter to find specific domain links
+        await expect(
+          page
+            .getByTestId('domain-link')
+            .filter({ hasText: testDomain1.data.displayName })
+        ).toBeVisible();
+        await expect(
+          page
+            .getByTestId('domain-link')
+            .filter({ hasText: testDomain2.data.displayName })
+        ).toBeVisible();
+      } finally {
+        await testGlossaryTerm.delete(apiContext);
+        await testGlossary.delete(apiContext);
+        await testDomain1.delete(apiContext);
+        await testDomain2.delete(apiContext);
+        await afterAction();
+      }
     });
   }
 );

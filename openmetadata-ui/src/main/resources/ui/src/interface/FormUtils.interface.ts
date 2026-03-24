@@ -33,6 +33,7 @@ export enum FieldTypes {
   PASSWORD_MUI = 'password_mui',
   FILTER_PATTERN = 'filter_pattern',
   SWITCH = 'switch',
+  SWITCH_MUI = 'switch_mui',
   SELECT = 'select',
   SELECT_MUI = 'select_mui',
   ASYNC_SELECT_LIST = 'async_select_list',
@@ -41,7 +42,7 @@ export enum FieldTypes {
   SLIDER_INPUT = 'slider_input',
   DESCRIPTION = 'description',
   TAG_SUGGESTION = 'tag_suggestion',
-  TAG_SUGGESTION_MUI = 'tag_suggestion_mui',
+  UT_TAG_SUGGESTION = 'ut_tag_suggestion',
   GLOSSARY_TAG_SUGGESTION_MUI = 'glossary_tag_suggestion_mui',
   USER_TEAM_SELECT = 'user_team_select',
   USER_TEAM_SELECT_INPUT = 'user_team_select_input',
@@ -55,6 +56,8 @@ export enum FieldTypes {
   COVER_IMAGE_UPLOAD_MUI = 'cover_image_upload_mui',
   CRON_EDITOR = 'cron_editor',
   TREE_ASYNC_SELECT_LIST = 'tree_async_select_list',
+  AUTOCOMPLETE_MUI = 'autocomplete_mui',
+  COMPONENT = 'component',
 }
 
 export enum HelperTextType {
