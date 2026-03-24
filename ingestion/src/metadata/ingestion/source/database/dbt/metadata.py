@@ -132,6 +132,7 @@ class DbtSource(DbtServiceSource):
 
     def __init__(self, config: WorkflowSource, metadata: OpenMetadata):
         super().__init__()
+        logger.info("\n\n🚀 Custom DBT Source Initialized 🚀\n\n")
         self.config = config
         self.source_config = self.config.sourceConfig.config
         self.metadata = metadata
