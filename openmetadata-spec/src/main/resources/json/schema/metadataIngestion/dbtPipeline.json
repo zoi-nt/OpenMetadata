@@ -57,9 +57,45 @@
       "type": "boolean",
       "default": false
     },
+    "dbtUpdateSources": {
+      "title": "Update Sources",
+      "description": "Optional configuration to update the sources from DBT or not",
+      "type": "boolean",
+      "default": false
+    },
+    "dbtUpdateExposures": {
+      "title": "Update Exposures",
+      "description": "Optional configuration to update the exposures from DBT or not",
+      "type": "boolean",
+      "default": false
+    },
+    "dbtUpdateLineages": {
+      "title": "Update Lineages",
+      "description": "Optional configuration to update the lineage from DBT or not",
+      "type": "boolean",
+      "default": false
+    },
+    "dbtUpdateMetaConfigs": {
+      "title": "Update Meta Configs",
+      "description": "Optional configuration to update the meta configs from DBT or not",
+      "type": "boolean",
+      "default": false
+    },
     "dbtUpdateOwners": {
       "title": "Update Owners",
       "description": "Optional configuration to update the owners from DBT or not",
+      "type": "boolean",
+      "default": false
+    },
+    "dbtUpdateResourceTags": {
+      "title": "Update Resource Tags",
+      "description": "Optional configuration to update the resource tags from DBT or not",
+      "type": "boolean",
+      "default": false
+    },
+    "dbtUpdateTests": {
+      "title": "Update Tests",
+      "description": "Optional configuration to update the tests from DBT or not",
       "type": "boolean",
       "default": false
     },
