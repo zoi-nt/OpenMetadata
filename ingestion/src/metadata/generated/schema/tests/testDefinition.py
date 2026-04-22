@@ -19,7 +19,7 @@ from ..type import basic, entityHistory, entityReferenceList
 class TestPlatform(Enum):
     OpenMetadata = 'OpenMetadata'
     GreatExpectations = 'GreatExpectations'
-    dbt = 'dbt'
+    dbt = 'DBT'  #server verion 1.9.5 expect dbt as 'DBT'
     Deequ = 'Deequ'
     Soda = 'Soda'
     Other = 'Other'
