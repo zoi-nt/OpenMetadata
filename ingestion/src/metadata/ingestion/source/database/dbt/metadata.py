@@ -876,6 +876,24 @@ class DbtSource(DbtServiceSource):
                 )
                 return table_entity
 
+            # Fallback: ES search may fail for FQNs with special chars (e.g. hyphens).
+            # Try direct API lookup by name instead.
+            try:
+                table_entity = self.metadata.get_by_name(
+                    entity=Table,
+                    fqn=table_fqn,
+                    fields=["sourceHash"],
+                )
+                if table_entity:
+                    logger.debug(
+                        f"Found Table Entity via get_by_name fallback: {table_fqn}"
+                    )
+                    return table_entity
+            except Exception as _fallback_exc:
+                logger.debug(
+                    f"get_by_name fallback also failed for '{table_fqn}': {_fallback_exc}"
+                )
+
             if self.source_config.searchAcrossDatabases:
                 logger.warning(
                     f"Table {table_fqn} not found under service: {self.config.serviceName}."
@@ -2069,6 +2087,26 @@ class DbtSource(DbtServiceSource):
                     test_case = self.metadata.get_by_name(
                         TestCase, test_case_fqn, fields=["testDefinition,testSuite"]
                     )
+                    # Fallback: ES-based get_by_name may fail for FQNs with hyphens.
+                    # Try direct API call via es_search_from_fqn as secondary check.
+                    if test_case is None:
+                        try:
+                            from metadata.utils.entity_link import get_entity_from_es_result
+                            tc_list = get_entity_from_es_result(
+                                entity_list=self.metadata.es_search_from_fqn(
+                                    entity_type=TestCase,
+                                    fqn_search_string=test_case_fqn,
+                                ),
+                                fetch_multiple_entities=True,
+                            )
+                            if tc_list:
+                                test_case = next(iter(filter(None, tc_list)), None)
+                                if test_case:
+                                    logger.debug(
+                                        f"Test case Already Exists (ES fallback): {test_case_fqn}"
+                                    )
+                        except Exception:
+                            pass
                     if test_case is None:
                         # Create the test case only if it does not exist
                         yield Either(
