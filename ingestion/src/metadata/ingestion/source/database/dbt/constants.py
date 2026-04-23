@@ -142,6 +142,7 @@ class DbtTestFailureEnum(Enum):
     FAILURE = "failure"
     FAIL = "fail"
     ERROR = "error"
+    WARN = "warn"  # dbt warn = real violations found, non-blocking but still a failure
 
 
 class DbtCommonEnum(Enum):
