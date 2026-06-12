@@ -136,6 +136,7 @@ class DbtSource(DbtServiceSource):
         self.config = config
         self.source_config = self.config.sourceConfig.config
         self.metadata = metadata
+        logger.info("\n\n🚀 Custom DBT Source Initialized 🚀\n\n")
         self.tag_classification_name = (
             self.source_config.dbtClassificationName
             if self.source_config.dbtClassificationName
@@ -272,7 +273,14 @@ class DbtSource(DbtServiceSource):
                         name=owner_name, is_owner=True
                     ) or self.metadata.get_reference_by_email(email=owner_name)
                     if owner_ref:
-                        owner_list.root.extend(owner_ref.root)
+                        if isinstance(owner_ref, EntityReferenceList):
+                            # Filter out None values before extending
+                            valid_owners = [o for o in owner_ref.root if o is not None]
+                            if valid_owners:
+                                owner_list.root.extend(valid_owners)
+                        else:
+                            # Single EntityReference
+                            owner_list.root.append(owner_ref)
                     else:
                         logger.warning(
                             "Unable to ingest owner from DBT since no user or"
@@ -1845,6 +1853,25 @@ class DbtSource(DbtServiceSource):
                     test_case = self.metadata.get_by_name(
                         TestCase, test_case_fqn, fields=["testDefinition,testSuite"]
                     )
+                    # Fallback: ES-based get_by_name may fail for FQNs with hyphens.
+                    # Try direct API call via es_search_from_fqn as secondary check.
+                    if test_case is None:
+                        try:
+                            tc_list = get_entity_from_es_result(
+                                entity_list=self.metadata.es_search_from_fqn(
+                                    entity_type=TestCase,
+                                    fqn_search_string=test_case_fqn,
+                                ),
+                                fetch_multiple_entities=True,
+                            )
+                            if tc_list:
+                                test_case = next(iter(filter(None, tc_list)), None)
+                                if test_case:
+                                    logger.debug(
+                                        f"Test case Already Exists (ES fallback): {test_case_fqn}"
+                                    )
+                        except Exception:  # pylint: disable=broad-except
+                            pass
                     if test_case is None:
                         # Create the test case only if it does not exist
                         yield Either(
