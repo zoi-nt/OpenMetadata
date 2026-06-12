@@ -53,6 +53,13 @@ from metadata.generated.schema.type.basic import (
     Timestamp,
     Uuid,
 )
+from metadata.generated.schema.type.tagLabel import (
+    LabelType,
+    State,
+    TagFQN,
+    TagLabel,
+    TagSource,
+)
 from metadata.generated.schema.type.entityLineage import EntitiesEdge, LineageDetails
 from metadata.generated.schema.type.entityLineage import Source as LineageSource
 from metadata.generated.schema.type.entityReference import EntityReference
@@ -137,6 +144,7 @@ class DbtSource(DbtServiceSource):
         self.omd_custom_properties = {}
         self.extracted_custom_properties = {}
         self.extracted_domains = {}
+        self.extracted_tags = {}
         self._load_omd_custom_properties()
 
     @classmethod
@@ -188,8 +196,10 @@ class DbtSource(DbtServiceSource):
                 return None
 
             dbt_meta_info = DbtMeta(**manifest_node.meta)
-            if dbt_meta_info.openmetadata and dbt_meta_info.openmetadata.domain:
-                domain_name = dbt_meta_info.openmetadata.domain
+            # openmetadata (1.13.0) takes priority over datacatalog (1.11.8 compat), then flat meta.domain
+            nested = dbt_meta_info.openmetadata or dbt_meta_info.datacatalog
+            domain_name = (nested.domain if nested else None) or dbt_meta_info.domain
+            if domain_name:
                 domain_entity = find_domain_by_name(self.metadata, domain_name)
 
                 if domain_entity:
@@ -218,9 +228,9 @@ class DbtSource(DbtServiceSource):
         try:
             dbt_owner = None
 
-            # PRIORITY 1: Check manifest node meta.openmetadata.owner
+            # PRIORITY 1: Check manifest node meta.openmetadata.owner (1.13.0) or meta.datacatalog.owner (1.11.8 compat)
             if manifest_node and manifest_node.meta:
-                openmetadata = manifest_node.meta.get("openmetadata", {})
+                openmetadata = manifest_node.meta.get("openmetadata") or manifest_node.meta.get("datacatalog", {})
                 if openmetadata:
                     openmetadata_owner = openmetadata.get("owner")
                     if openmetadata_owner:
@@ -803,12 +813,24 @@ class DbtSource(DbtServiceSource):
                 if table_entity:
                     return table_entity
 
-            logger.warning(
-                f"Unable to find the table '{table_fqn}' in OpenMetadata. "
-                "Please check if the table exists and is ingested in OpenMetadata. "
-                "Also, ensure the name, database, and schema of the manifest node"
-                "match the table present in OpenMetadata."
-            )
+            # Fallback: ES search may fail for FQNs with special chars (e.g. hyphens).
+            # Try direct API lookup by name instead.
+            try:
+                table_entity = self.metadata.get_by_name(
+                    entity=Table,
+                    fqn=table_fqn,
+                    fields=["sourceHash"],
+                )
+                if table_entity:
+                    logger.debug(
+                        f"Found Table Entity via get_by_name fallback: {table_fqn}"
+                    )
+                    return table_entity
+            except Exception as _fallback_exc:
+                logger.debug(
+                    f"get_by_name fallback also failed for '{table_fqn}': {_fallback_exc}"
+                )
+
         except Exception as exc:
             logger.debug(traceback.format_exc())
             logger.warning(
@@ -952,10 +974,14 @@ class DbtSource(DbtServiceSource):
                         table_name=model_name,
                     )
 
-                    if manifest_node.meta:
+                    if manifest_node.meta or hasattr(manifest_node, "config"):
                         dbt_table_tags_list.extend(
-                            self.process_dbt_meta(manifest_node.meta, table_fqn) or []
+                            self.process_dbt_meta(manifest_node, table_fqn) or []
                         )
+
+                    # Store all tags for later patching in process_dbt_tags
+                    if dbt_table_tags_list:
+                        self.extracted_tags[table_fqn] = dbt_table_tags_list
 
                     dbt_compiled_query = get_dbt_compiled_query(manifest_node)
                     dbt_raw_query = get_dbt_raw_query(manifest_node)
@@ -1419,54 +1445,166 @@ class DbtSource(DbtServiceSource):
                     f"Failed to parse the node {upstream_node} to capture lineage: {exc}"
                 )
 
-    def process_dbt_meta(self, manifest_meta, table_fqn):
+    def extract_resource_tags_from_config(self, manifest_node: Any) -> Optional[str]:
         """
-        Method to process DBT meta for Tags and GlossaryTerms
+        Extracts resource_tags value from dbt config() block.
+        Handles BigQuery native format: config(resource_tags = {...})
+        """
+        try:
+            if not manifest_node:
+                return None
+            if hasattr(manifest_node, "config"):
+                config_obj = manifest_node.config
+                if config_obj is None:
+                    pass
+                elif isinstance(config_obj, dict):
+                    if "resource_tags" in config_obj:
+                        resource_tags_value = config_obj["resource_tags"]
+                        if isinstance(resource_tags_value, dict) and resource_tags_value:
+                            for _, value in resource_tags_value.items():
+                                return value
+                else:
+                    if hasattr(config_obj, "resource_tags"):
+                        resource_tags_value = getattr(config_obj, "resource_tags")
+                        if isinstance(resource_tags_value, dict) and resource_tags_value:
+                            for _, value in resource_tags_value.items():
+                                return value
+                    elif hasattr(config_obj, "meta"):
+                        meta_obj = getattr(config_obj, "meta")
+                        if isinstance(meta_obj, dict) and "resource_tags" in meta_obj:
+                            resource_tags_value = meta_obj.get("resource_tags")
+                            if resource_tags_value:
+                                return resource_tags_value
+        except Exception as exc:
+            logger.debug(traceback.format_exc())
+            logger.warning(f"Error extracting resource_tags from config: {exc}")
+        return None
+
+    def _map_resource_tier(self, tier_value: str) -> Optional[str]:
+        """
+        Maps tier values (Tier1-5 or display names) to canonical display names.
+        Returns None for invalid values.
+        """
+        VALID_RESOURCE_TAGS = {
+            "Tier1", "Tier2", "Tier3", "Tier4", "Tier5",
+            "confidential-restricted", "confidential-local",
+            "confidential-global", "internal", "public",
+        }
+        if tier_value not in VALID_RESOURCE_TAGS:
+            logger.warning(
+                f"Invalid resource_tag value '{tier_value}' — must be one of: "
+                f"{sorted(VALID_RESOURCE_TAGS)}. Skipping."
+            )
+            return None
+        tier_mapping = {
+            "Tier1": "confidential-restricted",
+            "Tier2": "confidential-local",
+            "Tier3": "confidential-global",
+            "Tier4": "internal",
+            "Tier5": "public",
+            "confidential-restricted": "confidential-restricted",
+            "confidential-local": "confidential-local",
+            "confidential-global": "confidential-global",
+            "internal": "internal",
+            "public": "public",
+        }
+        return tier_mapping[tier_value]
+
+    def _convert_resource_tier_to_fqn(self, tier_value: Optional[str]) -> Optional[str]:
+        """
+        Converts a resource tier display name to Tier classification FQN.
+        e.g. "confidential-restricted" -> "Tier.Tier1"
+        """
+        if tier_value is None:
+            return None
+        tier_to_fqn = {
+            "Tier1": "Tier.Tier1",
+            "Tier2": "Tier.Tier2",
+            "Tier3": "Tier.Tier3",
+            "Tier4": "Tier.Tier4",
+            "Tier5": "Tier.Tier5",
+            "confidential-restricted": "Tier.Tier1",
+            "confidential-local": "Tier.Tier2",
+            "confidential-global": "Tier.Tier3",
+            "internal": "Tier.Tier4",
+            "public": "Tier.Tier5",
+        }
+        return tier_to_fqn.get(tier_value, tier_value)
+
+    def process_dbt_meta(self, manifest_node: Any, table_fqn: str):
+        """
+        Method to process DBT meta for Tags and GlossaryTerms.
+        Supports both:
+          - meta.openmetadata.xxx  (1.13.0 standard)
+          - meta.datacatalog.xxx   (backward compat with 1.11.8 dbt YAMLs)
+          - flat meta.domain / meta.tier / etc.
         """
         dbt_table_tags_list = []
         try:
-            dbt_meta_info = DbtMeta(**manifest_meta)
-            if dbt_meta_info.openmetadata and dbt_meta_info.openmetadata.glossary:
+            manifest_meta = manifest_node.meta if hasattr(manifest_node, "meta") else {}
+            dbt_meta_info = DbtMeta(**manifest_meta) if manifest_meta else DbtMeta()
+
+            # Resolve nested structure: openmetadata (1.13.0) takes priority over datacatalog (1.11.8 compat)
+            nested = dbt_meta_info.openmetadata or dbt_meta_info.datacatalog
+
+            # Glossary
+            glossary = (nested.glossary if nested else None) or dbt_meta_info.glossary
+            if glossary:
                 dbt_table_tags_list.extend(
                     get_tag_labels(
                         metadata=self.metadata,
-                        tags=dbt_meta_info.openmetadata.glossary,
+                        tags=glossary,
                         include_tags=True,
                         tag_type=GlossaryTerm,
                     )
                     or []
                 )
 
-            if dbt_meta_info.openmetadata and dbt_meta_info.openmetadata.tier:
-                tier_fqn = dbt_meta_info.openmetadata.tier
-                dbt_table_tags_list.extend(
-                    get_tag_labels(
+            # Tier tag: priority 1 = config.resource_tags (BigQuery native),
+            # priority 2 = nested.tier, priority 3 = flat meta.tier
+            resource_tag_value = self.extract_resource_tags_from_config(manifest_node)
+            if not resource_tag_value:
+                resource_tag_value = (nested.tier if nested else None) or dbt_meta_info.tier
+
+            if resource_tag_value:
+                mapped_tag = self._map_resource_tier(resource_tag_value)
+                if mapped_tag:
+                    fqn_tag = self._convert_resource_tier_to_fqn(mapped_tag)
+                    tag_parts = fqn_tag.split(".", 1)
+                    classification_name = tag_parts[0]
+                    tag_name = tag_parts[1] if len(tag_parts) > 1 else fqn_tag
+                    resource_tag_labels = get_tag_labels(
                         metadata=self.metadata,
-                        tags=[tier_fqn.split(fqn.FQN_SEPARATOR)[-1]],
-                        classification_name=tier_fqn.split(fqn.FQN_SEPARATOR)[0],
+                        tags=[tag_name],
+                        classification_name=classification_name,
                         include_tags=True,
                     )
-                    or []
-                )
+                    if resource_tag_labels:
+                        dbt_table_tags_list.extend(resource_tag_labels)
+                    else:
+                        # Fallback: construct TagLabel directly
+                        tag_label = TagLabel(
+                            tagFQN=TagFQN(fqn_tag),
+                            source=TagSource.Classification,
+                            labelType=LabelType.Automated,
+                            state=State.Confirmed,
+                        )
+                        dbt_table_tags_list.append(tag_label)
 
-            if (
-                dbt_meta_info.openmetadata
-                and dbt_meta_info.openmetadata.customProperties
-            ):
-                # Store custom properties mapped to table FQN
-                self.extracted_custom_properties[
-                    table_fqn
-                ] = dbt_meta_info.openmetadata.customProperties
+            # Custom properties
+            custom_props = (nested.customProperties if nested else None) or dbt_meta_info.customProperties
+            if custom_props:
+                self.extracted_custom_properties[table_fqn] = custom_props
 
-            if dbt_meta_info.openmetadata and dbt_meta_info.openmetadata.domain:
-                self.extracted_domains[table_fqn] = dbt_meta_info.openmetadata.domain
+            # Domain
+            domain = (nested.domain if nested else None) or dbt_meta_info.domain
+            if domain:
+                self.extracted_domains[table_fqn] = domain
 
-            if (
-                self.source_config.includeTags
-                and dbt_meta_info.openmetadata
-                and dbt_meta_info.openmetadata.tags
-            ):
-                for tag_fqn in dbt_meta_info.openmetadata.tags:
+            # Tags
+            tags_to_process = (nested.tags if nested else None) or dbt_meta_info.tags
+            if self.source_config.includeTags and tags_to_process:
+                for tag_fqn in tags_to_process:
                     if not tag_fqn:
                         continue
                     try:
@@ -1496,6 +1634,44 @@ class DbtSource(DbtServiceSource):
             logger.warning(f"Failed to process meta dbt Tags and GlossaryTerms: {exc}")
 
         return dbt_table_tags_list or []
+
+    def process_dbt_tags(self, data_model_link: DataModelLink):
+        """
+        Method to process and apply DBT tags (including resource_tags) using patch API
+        """
+        table_entity: Table = data_model_link.table_entity
+
+        if not table_entity:
+            return
+
+        table_fqn = table_entity.fullyQualifiedName.root
+
+        try:
+            tags_list = self.extracted_tags.get(table_fqn, [])
+
+            if not tags_list:
+                return
+
+            updated_entity = self.metadata.patch_tags(
+                entity=Table,
+                source=table_entity,
+                tag_labels=tags_list,
+            )
+
+            if updated_entity:
+                logger.info(
+                    f"Applied {len(tags_list)} tags to table {table_fqn}"
+                )
+            else:
+                logger.warning(
+                    f"patch_tags returned None for table {table_fqn}"
+                )
+
+        except Exception as exc:
+            logger.warning(
+                f"Exception while processing tags for {table_fqn}: {exc}"
+            )
+            logger.debug(traceback.format_exc())
 
     def process_dbt_descriptions(self, data_model_link: DataModelLink):
         """
