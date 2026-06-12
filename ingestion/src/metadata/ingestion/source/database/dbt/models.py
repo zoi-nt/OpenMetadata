@@ -12,7 +12,7 @@
 Models required for dbt 
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel
 
@@ -43,10 +43,21 @@ class DbtMetaOpenmetadata(BaseModel):
     glossary: Optional[List[str]] = None
     customProperties: Optional[Dict[str, Any]] = None
     tags: Optional[List[str]] = None
+    owner: Optional[Union[str, List[str]]] = None
 
 
 class DbtMeta(BaseModel):
+    # Nested structure: meta.openmetadata.xxx (1.13.0 standard)
     openmetadata: Optional[DbtMetaOpenmetadata] = None
+    # Nested structure: meta.datacatalog.xxx (backward compat with dev/1.11.8 dbt YAMLs)
+    datacatalog: Optional[DbtMetaOpenmetadata] = None
+    # Flat structure support (for BigQuery/dbt native format): meta.owner, meta.domain, etc.
+    domain: Optional[str] = None
+    owner: Optional[Union[str, List[str]]] = None
+    customProperties: Optional[Dict[str, Any]] = None
+    tier: Optional[str] = None
+    glossary: Optional[List[str]] = None
+    tags: Optional[List[str]] = None
 
 
 class SnapshotNodeLocation(BaseModel):
