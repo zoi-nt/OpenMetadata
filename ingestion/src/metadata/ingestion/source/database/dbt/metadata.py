@@ -197,9 +197,13 @@ class DbtSource(DbtServiceSource):
                 return None
 
             dbt_meta_info = DbtMeta(**manifest_node.meta)
-            # openmetadata (1.13.0) takes priority over datacatalog (1.11.8 compat), then flat meta.domain
-            nested = dbt_meta_info.openmetadata or dbt_meta_info.datacatalog
-            domain_name = (nested.domain if nested else None) or dbt_meta_info.domain
+
+            # Try flat structure first (Priority 1)
+            domain_name = dbt_meta_info.domain
+            # Fallback to nested datacatalog structure (Priority 2)
+            if not domain_name and dbt_meta_info.datacatalog:
+                domain_name = dbt_meta_info.datacatalog.domain
+
             if domain_name:
                 domain_entity = find_domain_by_name(self.metadata, domain_name)
 
@@ -222,27 +226,29 @@ class DbtSource(DbtServiceSource):
     ) -> Optional[EntityReferenceList]:
         """
         Returns dbt owner with priority:
-        1. manifest_node.meta.openmetadata.owner (OpenMetadata docs format - HIGHEST PRIORITY)
-        2. manifest_node.meta.owner (old format)
+        1. manifest_node.meta.owner (flat format - HIGHEST PRIORITY)
+        2. manifest_node.meta.datacatalog.owner (nested format)
         3. catalog_node.metadata.owner (standard DBT location - LOWEST PRIORITY)
+        Handles both string and list formats for owner
         """
         try:
             dbt_owner = None
 
-            # PRIORITY 1: Check manifest node meta.openmetadata.owner (1.13.0) or meta.datacatalog.owner (1.11.8 compat)
+            # PRIORITY 1: Check manifest node meta.owner (flat format)
             if manifest_node and manifest_node.meta:
-                openmetadata = manifest_node.meta.get("openmetadata") or manifest_node.meta.get("datacatalog", {})
-                if openmetadata:
-                    openmetadata_owner = openmetadata.get("owner")
-                    if openmetadata_owner:
-                        dbt_owner = openmetadata_owner
+                flat_owner = manifest_node.meta.get("owner")
+                if flat_owner:
+                    logger.debug(f"Found owner in flat meta: {flat_owner}")
+                    dbt_owner = flat_owner
 
-            # PRIORITY 2: Check old format meta.owner
-            if not dbt_owner:
-                if manifest_node and manifest_node.meta:
-                    old_owner = manifest_node.meta.get(DbtCommonEnum.OWNER.value)
-                    if old_owner:
-                        dbt_owner = old_owner
+            # PRIORITY 2: Check nested datacatalog.owner
+            if not dbt_owner and manifest_node and manifest_node.meta:
+                datacatalog = manifest_node.meta.get("datacatalog", {})
+                if datacatalog:
+                    datacatalog_owner = datacatalog.get("owner")
+                    if datacatalog_owner:
+                        logger.debug(f"Found owner in datacatalog: {datacatalog_owner}")
+                        dbt_owner = datacatalog_owner
 
             # PRIORITY 3: Check catalog node
             if not dbt_owner:
@@ -1151,26 +1157,29 @@ class DbtSource(DbtServiceSource):
                 if manifest_column.meta:
                     dbt_column_meta = DbtMeta(**manifest_column.meta)
                     logger.debug(f"Processing DBT column glossary: {key}")
-                    if (
-                        dbt_column_meta.openmetadata
-                        and dbt_column_meta.openmetadata.glossary
-                    ):
+
+                    # Try flat structure first (Priority 1), fallback to nested datacatalog
+                    glossary_terms = dbt_column_meta.glossary
+                    if not glossary_terms and dbt_column_meta.datacatalog:
+                        glossary_terms = dbt_column_meta.datacatalog.glossary
+
+                    if glossary_terms:
                         dbt_column_tag_list.extend(
                             get_tag_labels(
                                 metadata=self.metadata,
-                                tags=dbt_column_meta.openmetadata.glossary,
+                                tags=glossary_terms,
                                 include_tags=self.source_config.includeTags,
                                 tag_type=GlossaryTerm,
                             )
                             or []
                         )
 
-                    if (
-                        self.source_config.includeTags
-                        and dbt_column_meta.openmetadata
-                        and dbt_column_meta.openmetadata.tags
-                    ):
-                        for tag_fqn in dbt_column_meta.openmetadata.tags:
+                    column_tags = dbt_column_meta.tags
+                    if not column_tags and dbt_column_meta.datacatalog:
+                        column_tags = dbt_column_meta.datacatalog.tags
+
+                    if self.source_config.includeTags and column_tags:
+                        for tag_fqn in column_tags:
                             if not tag_fqn:
                                 continue
                             try:
@@ -1541,22 +1550,23 @@ class DbtSource(DbtServiceSource):
 
     def process_dbt_meta(self, manifest_node: Any, table_fqn: str):
         """
-        Method to process DBT meta for Tags and GlossaryTerms.
-        Supports both:
-          - meta.openmetadata.xxx  (1.13.0 standard)
-          - meta.datacatalog.xxx   (backward compat with 1.11.8 dbt YAMLs)
-          - flat meta.domain / meta.tier / etc.
+        Method to process DBT meta for Tags and GlossaryTerms
+        Supports both flat and nested (datacatalog) meta structures
+        Also extracts resource_tags from dbt config for BigQuery native format
+        Priority: flat structure > nested datacatalog
         """
         dbt_table_tags_list = []
         try:
             manifest_meta = manifest_node.meta if hasattr(manifest_node, "meta") else {}
             dbt_meta_info = DbtMeta(**manifest_meta) if manifest_meta else DbtMeta()
+            logger.info(f"[process_dbt_meta] ► Starting processing for table: {table_fqn}")
+            logger.debug(f"[process_dbt_meta] manifest_meta keys: {list(manifest_meta.keys()) if manifest_meta else 'empty'}")
+            logger.debug(f"[process_dbt_meta] has config: {hasattr(manifest_node, 'config')}")
 
-            # Resolve nested structure: openmetadata (1.13.0) takes priority over datacatalog (1.11.8 compat)
-            nested = dbt_meta_info.openmetadata or dbt_meta_info.datacatalog
-
-            # Glossary
-            glossary = (nested.glossary if nested else None) or dbt_meta_info.glossary
+            # Extract glossary terms (Priority 1: flat, 2: nested datacatalog)
+            glossary = dbt_meta_info.glossary
+            if not glossary and dbt_meta_info.datacatalog:
+                glossary = dbt_meta_info.datacatalog.glossary
             if glossary:
                 dbt_table_tags_list.extend(
                     get_tag_labels(
@@ -1568,11 +1578,25 @@ class DbtSource(DbtServiceSource):
                     or []
                 )
 
-            # Tier tag: priority 1 = config.resource_tags (BigQuery native),
-            # priority 2 = nested.tier, priority 3 = flat meta.tier
+            # Extract resource_tags with priorities:
+            # Priority 1: config.resource_tags (BigQuery native - dict format)
+            # Priority 2: meta.resource_tags (flat format - string)
+            # Priority 3: datacatalog.resource_tags (nested format - string)
             resource_tag_value = self.extract_resource_tags_from_config(manifest_node)
+            if resource_tag_value:
+                logger.info(f"[process_dbt_meta] ✓ Found resource_tags in config for {table_fqn}: '{resource_tag_value}'")
+
             if not resource_tag_value:
-                resource_tag_value = (nested.tier if nested else None) or dbt_meta_info.tier
+                resource_tag_value = dbt_meta_info.resource_tags
+                if resource_tag_value:
+                    logger.info(f"[process_dbt_meta] ✓ Found resource_tags in flat meta for {table_fqn}: '{resource_tag_value}'")
+            if not resource_tag_value and dbt_meta_info.datacatalog:
+                resource_tag_value = dbt_meta_info.datacatalog.resource_tags
+                if resource_tag_value:
+                    logger.info(f"[process_dbt_meta] ✓ Found resource_tags in nested datacatalog for {table_fqn}: '{resource_tag_value}'")
+
+            if not resource_tag_value:
+                logger.debug(f"[process_dbt_meta] ✗ No resource_tags found for {table_fqn} (checked all 3 priorities)")
 
             if resource_tag_value:
                 mapped_tag = self._map_resource_tier(resource_tag_value)
@@ -1599,18 +1623,26 @@ class DbtSource(DbtServiceSource):
                         )
                         dbt_table_tags_list.append(tag_label)
 
-            # Custom properties
-            custom_props = (nested.customProperties if nested else None) or dbt_meta_info.customProperties
+            # Extract businessProperties (Priority 1: flat, 2: nested datacatalog)
+            custom_props = dbt_meta_info.businessProperties
+            if not custom_props and dbt_meta_info.datacatalog:
+                custom_props = dbt_meta_info.datacatalog.businessProperties
             if custom_props:
+                logger.debug(f"Found businessProperties: {list(custom_props.keys())}")
                 self.extracted_custom_properties[table_fqn] = custom_props
 
-            # Domain
-            domain = (nested.domain if nested else None) or dbt_meta_info.domain
+            # Domain (Priority 1: flat, 2: nested datacatalog)
+            domain = dbt_meta_info.domain
+            if not domain and dbt_meta_info.datacatalog:
+                domain = dbt_meta_info.datacatalog.domain
             if domain:
+                logger.debug(f"Found domain: {domain}")
                 self.extracted_domains[table_fqn] = domain
 
-            # Tags
-            tags_to_process = (nested.tags if nested else None) or dbt_meta_info.tags
+            # Tags (Priority 1: flat, 2: nested datacatalog)
+            tags_to_process = dbt_meta_info.tags
+            if not tags_to_process and dbt_meta_info.datacatalog:
+                tags_to_process = dbt_meta_info.datacatalog.tags
             if self.source_config.includeTags and tags_to_process:
                 for tag_fqn in tags_to_process:
                     if not tag_fqn:

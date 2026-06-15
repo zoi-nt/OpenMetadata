@@ -38,24 +38,21 @@ class DbtFilteredModel(BaseModel):
 
 
 class DbtMetaOpenmetadata(BaseModel):
-    tier: Optional[str] = None
+    resource_tags: Optional[str] = None
     domain: Optional[str] = None
     glossary: Optional[List[str]] = None
-    customProperties: Optional[Dict[str, Any]] = None
+    businessProperties: Optional[Dict[str, Any]] = None
     tags: Optional[List[str]] = None
     owner: Optional[Union[str, List[str]]] = None
 
 
 class DbtMeta(BaseModel):
-    # Nested structure: meta.openmetadata.xxx (1.13.0 standard)
-    openmetadata: Optional[DbtMetaOpenmetadata] = None
-    # Nested structure: meta.datacatalog.xxx (backward compat with dev/1.11.8 dbt YAMLs)
     datacatalog: Optional[DbtMetaOpenmetadata] = None
-    # Flat structure support (for BigQuery/dbt native format): meta.owner, meta.domain, etc.
+    # Flat structure support (for BigQuery/dbt native format)
     domain: Optional[str] = None
     owner: Optional[Union[str, List[str]]] = None
-    customProperties: Optional[Dict[str, Any]] = None
-    tier: Optional[str] = None
+    businessProperties: Optional[Dict[str, Any]] = None
+    resource_tags: Optional[str] = None
     glossary: Optional[List[str]] = None
     tags: Optional[List[str]] = None
 
