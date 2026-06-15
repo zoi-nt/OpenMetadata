@@ -49,6 +49,7 @@ from metadata.generated.schema.tests.testDefinition import (
 )
 from metadata.generated.schema.type.basic import (
     FullyQualifiedEntityName,
+    Markdown,
     SqlQuery,
     Timestamp,
     Uuid,
@@ -104,8 +105,6 @@ from metadata.ingestion.source.database.dbt.dbt_utils import (
     get_dbt_compiled_query,
     get_dbt_model_name,
     get_dbt_raw_query,
-    get_manifest_column_name,
-    get_snapshot_effective_schema_and_database,
     validate_custom_property_value,
 )
 from metadata.ingestion.source.database.dbt.models import DbtMeta
@@ -133,10 +132,10 @@ class DbtSource(DbtServiceSource):
 
     def __init__(self, config: WorkflowSource, metadata: OpenMetadata):
         super().__init__()
+        logger.info("\n\n🚀 Custom DBT Source Initialized 🚀\n\n")
         self.config = config
         self.source_config = self.config.sourceConfig.config
         self.metadata = metadata
-        logger.info("\n\n🚀 Custom DBT Source Initialized 🚀\n\n")
         self.tag_classification_name = (
             self.source_config.dbtClassificationName
             if self.source_config.dbtClassificationName
@@ -186,7 +185,8 @@ class DbtSource(DbtServiceSource):
 
     def get_dbt_domain(self, manifest_node: Any) -> Optional[EntityReference]:
         """
-        Extracts domain from meta.openmetadata.domain and returns EntityReference
+        Extracts domain from meta.domain and returns EntityReference
+        Supports both flat and nested (datacatalog) meta structures
         """
         try:
             if (
@@ -197,19 +197,21 @@ class DbtSource(DbtServiceSource):
                 return None
 
             dbt_meta_info = DbtMeta(**manifest_node.meta)
-
+            
             # Try flat structure first (Priority 1)
             domain_name = dbt_meta_info.domain
-            # Fallback to nested datacatalog structure (Priority 2)
+            # Fallback to nested structure (Priority 2)
             if not domain_name and dbt_meta_info.datacatalog:
                 domain_name = dbt_meta_info.datacatalog.domain
-
+                
             if domain_name:
+                logger.debug(f"Processing DBT domain: {domain_name}")
                 domain_entity = find_domain_by_name(self.metadata, domain_name)
 
                 if domain_entity:
                     domain_ref_data = format_domain_reference(domain_entity)
                     if domain_ref_data:
+                        logger.debug(f"✓ Successfully found domain entity for: {domain_name}")
                         entity_ref = EntityReference(**domain_ref_data)
                         return entity_ref
                 else:
@@ -250,50 +252,89 @@ class DbtSource(DbtServiceSource):
                         logger.debug(f"Found owner in datacatalog: {datacatalog_owner}")
                         dbt_owner = datacatalog_owner
 
-            # PRIORITY 3: Check catalog node
+            # PRIORITY 3: Check old format meta.owner legacy key
+            if not dbt_owner:
+                if manifest_node and manifest_node.meta:
+                    old_owner = manifest_node.meta.get(DbtCommonEnum.OWNER.value)
+                    if old_owner:
+                        logger.debug(f"Found owner in old meta format: {old_owner}")
+                        dbt_owner = old_owner
+
+            # PRIORITY 4: Check catalog node
             if not dbt_owner:
                 if catalog_node:
                     try:
                         catalog_owner = catalog_node.metadata.owner
                         if catalog_owner:
+                            logger.debug(f"Found owner in catalog node: {catalog_owner}")
                             dbt_owner = catalog_owner
                     except Exception as catalog_exc:
                         logger.debug(
                             f"Error accessing catalog_node.metadata.owner: {catalog_exc}"
                         )
 
+            # Normalize and resolve owner
             if dbt_owner and isinstance(dbt_owner, str):
                 owner_ref = self.metadata.get_reference_by_name(
                     name=dbt_owner, is_owner=True
                 ) or self.metadata.get_reference_by_email(email=dbt_owner)
                 if owner_ref:
+                    logger.debug(f"✓ Successfully resolved owner: {dbt_owner}")
                     return owner_ref
                 logger.warning(
                     "Unable to ingest owner from DBT since no user or"
                     f" team was found with name {dbt_owner}"
                 )
             elif dbt_owner and isinstance(dbt_owner, list):
+                logger.info(f"[get_dbt_owner] Processing owner list with {len(dbt_owner)} items: {dbt_owner}")
                 owner_list = EntityReferenceList(root=[])
-                for owner_name in dbt_owner:
+                for idx, owner_name in enumerate(dbt_owner):
+                    logger.debug(f"[get_dbt_owner]   [{idx+1}] Resolving owner: '{owner_name}'")
+                    
+                    # Try by name first (for teams and users)
                     owner_ref = self.metadata.get_reference_by_name(
                         name=owner_name, is_owner=True
-                    ) or self.metadata.get_reference_by_email(email=owner_name)
+                    )
+                    
+                    # If name doesn't work, try by email
+                    if not owner_ref:
+                        logger.debug(f"[get_dbt_owner]   [{idx+1}] Name not found, trying as email: '{owner_name}'")
+                        owner_ref = self.metadata.get_reference_by_email(email=owner_name)
+                    
                     if owner_ref:
+                        logger.info(f"[get_dbt_owner]   [{idx+1}] ✓ Resolved owner: {owner_name}")
+                        # owner_ref could be EntityReference (single) or EntityReferenceList
                         if isinstance(owner_ref, EntityReferenceList):
+                            logger.debug(f"[get_dbt_owner]      Owner resolves to EntityReferenceList with {len(owner_ref.root)} items")
                             # Filter out None values before extending
                             valid_owners = [o for o in owner_ref.root if o is not None]
                             if valid_owners:
                                 owner_list.root.extend(valid_owners)
+                                logger.debug(f"[get_dbt_owner]      Extended list with {len(valid_owners)} valid owner(s)")
+                            else:
+                                logger.warning(f"[get_dbt_owner]      EntityReferenceList had no valid owners (all None?)")
                         else:
-                            # Single EntityReference
-                            owner_list.root.append(owner_ref)
+                            logger.debug(f"[get_dbt_owner]      Owner resolves to single EntityReference")
+                            if owner_ref:  # Additional safety check
+                                owner_list.root.append(owner_ref)
                     else:
                         logger.warning(
-                            "Unable to ingest owner from DBT since no user or"
-                            f" team was found with name {owner_name}"
+                            f"[get_dbt_owner]   [{idx+1}] ✗ Unable to resolve owner '{owner_name}' "
+                            f"- no user or team found with this name or email"
                         )
+                
                 if owner_list.root:
+                    logger.info(f"[get_dbt_owner] ✓✓ Successfully resolved {len(owner_list.root)} owners total!")
+                    for idx, owner in enumerate(owner_list.root):
+                        if owner:
+                            owner_fqn = owner.fullyQualifiedName.root if (hasattr(owner, 'fullyQualifiedName') and owner.fullyQualifiedName) else str(owner) if owner else "None"
+                            logger.info(f"[get_dbt_owner]   [{idx+1}] Owner FQN: {owner_fqn}")
+                        else:
+                            logger.warning(f"[get_dbt_owner]   [{idx+1}] Owner is None!")
+                    logger.info(f"[get_dbt_owner] ✓ RETURNING EntityReferenceList with {len(owner_list.root)} items")
                     return owner_list
+                else:
+                    logger.warning(f"[get_dbt_owner] ✗ Could not resolve any owners from list: {dbt_owner}")
         except Exception as exc:
             logger.debug(traceback.format_exc())
             logger.warning(f"Unable to ingest owner from DBT due to: {exc}")
@@ -498,6 +539,65 @@ class DbtSource(DbtServiceSource):
             )
             logger.debug(traceback.format_exc())
 
+    def process_dbt_tags(self, data_model_link: DataModelLink):
+        """
+        Method to process and apply DBT tags (including resource_tags) using patch API
+        """
+        logger.info(f"[process_dbt_tags] Starting tag processing")
+        
+        table_entity: Table = data_model_link.table_entity
+
+        if not table_entity:
+            logger.warning("[process_dbt_tags] No table entity provided in data_model_link")
+            return
+
+        table_fqn = table_entity.fullyQualifiedName.root
+        logger.info(f"[process_dbt_tags] Processing tags for table: {table_fqn}")
+        logger.debug(f"[process_dbt_tags] Table ID: {table_entity.id}")
+
+        try:
+            logger.debug(f"[process_dbt_tags] Looking for tags in extracted_tags dict with {len(self.extracted_tags)} entries")
+            logger.debug(f"[process_dbt_tags] Available FQNs: {list(self.extracted_tags.keys())}")
+            
+            tags_list = self.extracted_tags.get(table_fqn, [])
+            logger.debug(f"[process_dbt_tags] Found {len(tags_list)} tags for FQN: {table_fqn}")
+
+            if not tags_list:
+                logger.info(f"[process_dbt_tags] No tags found for {table_fqn}, skipping patch")
+                return
+
+            logger.info(
+                f"[process_dbt_tags] ✓ Applying {len(tags_list)} tags to table {table_fqn}"
+            )
+            
+            # Log tag details for debugging
+            for idx, tag in enumerate(tags_list):
+                tag_fqn = tag.tagFQN.root if hasattr(tag.tagFQN, 'root') else tag.tagFQN
+                logger.info(f"[process_dbt_tags]   [{idx+1}] Applying tag: {tag_fqn}")
+
+            # Use the patch_tags method to apply tags
+            logger.debug(f"[process_dbt_tags] Calling metadata.patch_tags()...")
+            updated_entity = self.metadata.patch_tags(
+                entity=Table,
+                source=table_entity,
+                tag_labels=tags_list,
+            )
+
+            if updated_entity:
+                logger.info(f"[process_dbt_tags] ✓✓✓ SUCCESS! Applied {len(tags_list)} tags for table {table_fqn}")
+                applied_tags = [t.tagFQN.root if hasattr(t.tagFQN, 'root') else t.tagFQN for t in (updated_entity.tags or [])]
+                logger.info(f"[process_dbt_tags] Updated entity now has tags: {applied_tags}")
+            else:
+                logger.warning(
+                    f"[process_dbt_tags] ✗ FAILED: patch_tags returned None for table {table_fqn}"
+                )
+
+        except Exception as exc:
+            logger.error(
+                f"[process_dbt_tags] ✗ Exception while processing tags for {table_fqn}: {exc}"
+            )
+            logger.debug(traceback.format_exc())
+
     def _validate_custom_properties(
         self, table_entity: Table, custom_properties: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
@@ -640,8 +740,8 @@ class DbtSource(DbtServiceSource):
                     if model_tags:
                         dbt_tags_list.extend(self.filter_tags(model_tags))
 
-                    # snapshot nodes may have columns=None (columns are inferred at runtime)
-                    for _, column in (manifest_node.columns or {}).items():
+                    # Add the tags from the columns
+                    for _, column in manifest_node.columns.items():
                         column_tags = column.tags
                         if column_tags:
                             dbt_tags_list.extend(self.filter_tags(column_tags))
@@ -682,45 +782,6 @@ class DbtSource(DbtServiceSource):
                     )
                 )
 
-    @staticmethod
-    def _get_latest_result(dbt_objects: DbtObjects, key: str):
-        """
-        When multiple run_results files are present (e.g. split by domain),
-        the same unique_id may appear in more than one file.  Return the
-        result with the most recent ``execute`` completed_at timestamp so
-        that OpenMetadata always reflects the latest test state.
-        """
-        matches = [
-            item
-            for run_result in dbt_objects.dbt_run_results
-            for item in run_result.results
-            if item.unique_id == key
-        ]
-        if not matches:
-            return None
-        if len(matches) == 1:
-            return matches[0]
-
-        def _execute_completed_at(result):
-            for timing in result.timing or []:
-                if timing.name == "execute" and timing.completed_at:
-                    completed = timing.completed_at
-                    if isinstance(completed, str):
-                        try:
-                            return datetime.strptime(
-                                completed, DBT_RUN_RESULT_DATE_FORMAT
-                            )
-                        except ValueError:
-                            return None
-                    return completed
-            return None
-
-        timestamped = [(r, _execute_completed_at(r)) for r in matches]
-        with_ts = [(r, ts) for r, ts in timestamped if ts is not None]
-        if with_ts:
-            return max(with_ts, key=lambda pair: pair[1])[0]
-        return matches[0]
-
     def add_dbt_tests(
         self, key: str, manifest_node, manifest_entities, dbt_objects: DbtObjects
     ) -> None:
@@ -733,9 +794,15 @@ class DbtSource(DbtServiceSource):
         self.context.get().dbt_tests[key][
             DbtCommonEnum.UPSTREAM.value
         ] = self.parse_upstream_nodes(manifest_entities, manifest_node)
-        self.context.get().dbt_tests[key][
-            DbtCommonEnum.RESULTS.value
-        ] = self._get_latest_result(dbt_objects, key)
+        self.context.get().dbt_tests[key][DbtCommonEnum.RESULTS.value] = next(
+            (
+                item
+                for run_result in dbt_objects.dbt_run_results
+                for item in run_result.results
+                if item.unique_id == key
+            ),
+            None,
+        )
 
     def add_dbt_exposure(self, key: str, manifest_node, manifest_entities):
         exposure_entity = self.parse_exposure_node(manifest_node)
@@ -809,24 +876,6 @@ class DbtSource(DbtServiceSource):
                 )
                 return table_entity
 
-            if self.source_config.searchAcrossDatabases:
-                logger.warning(
-                    f"Table {table_fqn} not found under service: {self.config.serviceName}."
-                    "Trying to find table across services"
-                )
-                _, database_name, schema_name, table_name = fqn.split(table_fqn)
-                table_fqn = fqn.build(
-                    self.metadata,
-                    entity_type=Table,
-                    service_name="*",
-                    database_name=database_name,
-                    schema_name=schema_name,
-                    table_name=table_name,
-                )
-                table_entity = search_table(table_fqn)
-                if table_entity:
-                    return table_entity
-
             # Fallback: ES search may fail for FQNs with special chars (e.g. hyphens).
             # Try direct API lookup by name instead.
             try:
@@ -845,6 +894,30 @@ class DbtSource(DbtServiceSource):
                     f"get_by_name fallback also failed for '{table_fqn}': {_fallback_exc}"
                 )
 
+            if self.source_config.searchAcrossDatabases:
+                logger.warning(
+                    f"Table {table_fqn} not found under service: {self.config.serviceName}."
+                    "Trying to find table across services"
+                )
+                _, database_name, schema_name, table_name = fqn.split(table_fqn)
+                table_fqn = fqn.build(
+                    self.metadata,
+                    entity_type=Table,
+                    service_name="*",
+                    database_name=database_name,
+                    schema_name=schema_name,
+                    table_name=table_name,
+                )
+                table_entity = search_table(table_fqn)
+                if table_entity:
+                    return table_entity
+
+            logger.warning(
+                f"Unable to find the table '{table_fqn}' in OpenMetadata. "
+                "Please check if the table exists and is ingested in OpenMetadata. "
+                "Also, ensure the name, database, and schema of the manifest node"
+                "match the table present in OpenMetadata."
+            )
         except Exception as exc:
             logger.debug(traceback.format_exc())
             logger.warning(
@@ -940,21 +1013,10 @@ class DbtSource(DbtServiceSource):
 
                     model_name = get_dbt_model_name(manifest_node)
 
-                    # snapshots can redirect output to a different schema/database via config.target_schema/target_database
-                    if resource_type == "snapshot":
-                        location = get_snapshot_effective_schema_and_database(
-                            manifest_node
-                        )
-                        node_schema = location.schema_
-                        node_database = location.database
-                    else:
-                        node_schema = manifest_node.schema_
-                        node_database = manifest_node.database
-
-                    # Filter the dbt models based on filter patterns using effective schema/database
+                    # Filter the dbt models based on filter patterns
                     filter_model = self.is_filtered(
-                        database_name=get_corrected_name(node_database),
-                        schema_name=get_corrected_name(node_schema),
+                        database_name=get_corrected_name(manifest_node.database),
+                        schema_name=get_corrected_name(manifest_node.schema_),
                         table_name=model_name,
                     )
                     if filter_model.is_filtered:
@@ -970,6 +1032,7 @@ class DbtSource(DbtServiceSource):
                     dbt_table_tags_list = []
                     if manifest_node.tags:
                         manifest_node.tags = self.filter_tags(manifest_node.tags)
+                        logger.info(f"Found manifest tags for {model_name}: {manifest_node.tags}")
                         dbt_table_tags_list = (
                             get_tag_labels(
                                 metadata=self.metadata,
@@ -979,31 +1042,56 @@ class DbtSource(DbtServiceSource):
                             )
                             or []
                         )
+                        logger.info(f"Converted manifest tags to {len(dbt_table_tags_list)} tag labels")
+                    else:
+                        logger.debug(f"No manifest tags found for {model_name}")
+
                     table_fqn = fqn.build(
                         self.metadata,
                         entity_type=Table,
                         service_name=self.config.serviceName,
-                        database_name=get_corrected_name(node_database),
-                        schema_name=get_corrected_name(node_schema),
+                        database_name=get_corrected_name(manifest_node.database),
+                        schema_name=get_corrected_name(manifest_node.schema_),
                         table_name=model_name,
                     )
-
                     if manifest_node.meta or hasattr(manifest_node, "config"):
-                        dbt_table_tags_list.extend(
-                            self.process_dbt_meta(manifest_node, table_fqn) or []
-                        )
-
-                    # Store all tags for later patching in process_dbt_tags
-                    if dbt_table_tags_list:
-                        self.extracted_tags[table_fqn] = dbt_table_tags_list
+                        tags_before = len(dbt_table_tags_list)
+                        meta_tags = self.process_dbt_meta(manifest_node, table_fqn) or []
+                        dbt_table_tags_list.extend(meta_tags)
+                        logger.info(f"process_dbt_meta added {len(meta_tags)} tags (total now: {len(dbt_table_tags_list)})")
+                    else:
+                        logger.debug(f"No manifest.meta or config found for {model_name}")
 
                     dbt_compiled_query = get_dbt_compiled_query(manifest_node)
                     dbt_raw_query = get_dbt_raw_query(manifest_node)
+                    
+                    # Store all tags (manifest + meta tags) for later patching in process_dbt_tags
+                    if dbt_table_tags_list:
+                        logger.info(
+                            f"✓ Storing {len(dbt_table_tags_list)} tags for table {table_fqn} in extracted_tags"
+                        )
+                        for idx, tag in enumerate(dbt_table_tags_list):
+                            tag_fqn = tag.tagFQN.root if hasattr(tag.tagFQN, 'root') else tag.tagFQN
+                            logger.debug(f"    [{idx+1}] Tag: {tag_fqn}")
+                        self.extracted_tags[table_fqn] = dbt_table_tags_list
+                    else:
+                        logger.debug(f"No tags to store for table {table_fqn}")
 
                     if table_entity := self._get_table_entity(table_fqn=table_fqn):
+                        entity_fqn = table_entity.fullyQualifiedName.root
+                        logger.info(
+                            f"[FQN Match Check] Stored FQN: '{table_fqn}'"
+                        )
+                        logger.info(
+                            f"[FQN Match Check] Entity FQN: '{entity_fqn}'"
+                        )
+                        if table_fqn == entity_fqn:
+                            logger.info(f"[FQN Match Check] ✓ FQNs MATCH - tags will be retrievable")
+                        else:
+                            logger.warning(f"[FQN Match Check] ✗ FQNs DO NOT MATCH - this is a problem!")
+                        
                         logger.debug(
-                            f"Using Table Entity for datamodel: {table_entity.fullyQualifiedName.root}"
-                            f"with id {table_entity.id}"
+                            f"Using Table Entity for datamodel: {entity_fqn} with id {table_entity.id}"
                         )
 
                         data_model_link = DataModelLink(
@@ -1035,6 +1123,20 @@ class DbtSource(DbtServiceSource):
                                 dbtSourceProject=dbt_project_name,
                             ),
                         )
+                        
+                        # Log what owners were assigned to the data_model
+                        if data_model_link.datamodel.owners:
+                            owner_count = len(data_model_link.datamodel.owners.root) if hasattr(data_model_link.datamodel.owners, 'root') else 1
+                            logger.info(f"[yield_data_models] ✓ DataModel for {table_fqn} created with {owner_count} owner(s)")
+                            if hasattr(data_model_link.datamodel.owners, 'root'):
+                                for idx, owner in enumerate(data_model_link.datamodel.owners.root):
+                                    if owner:
+                                        owner_fqn = owner.fullyQualifiedName.root if (hasattr(owner, 'fullyQualifiedName') and owner.fullyQualifiedName) else str(owner) if owner else "None"
+                                        logger.debug(f"[yield_data_models]   [{idx+1}] Owner: {owner_fqn}")
+                                    else:
+                                        logger.warning(f"[yield_data_models]   [{idx+1}] Owner is None!")
+                        else:
+                            logger.debug(f"[yield_data_models] DataModel for {table_fqn} has no owners")
 
                         domain_ref = self.get_dbt_domain(manifest_node)
                         if domain_ref:
@@ -1042,6 +1144,8 @@ class DbtSource(DbtServiceSource):
 
                         yield Either(right=data_model_link)
                         self.context.get().data_model_links.append(data_model_link)
+                    else:
+                        logger.warning(f"⚠️ Table entity NOT FOUND for FQN: {table_fqn} - data_model_link may not be created, process_dbt_tags will NOT be called!")
 
                 except Exception as exc:
                     yield Either(
@@ -1068,24 +1172,9 @@ class DbtSource(DbtServiceSource):
                     parent_node = manifest_entities[node]
                     table_name = get_dbt_model_name(parent_node)
 
-                    parent_resource_type = getattr(
-                        parent_node.resource_type,
-                        "value",
-                        parent_node.resource_type,
-                    )
-                    if parent_resource_type == "snapshot":
-                        parent_location = get_snapshot_effective_schema_and_database(
-                            parent_node
-                        )
-                        parent_database = parent_location.database
-                        parent_schema = parent_location.schema_
-                    else:
-                        parent_database = parent_node.database
-                        parent_schema = parent_node.schema_
-
                     filter_model = self.is_filtered(
-                        database_name=get_corrected_name(parent_database),
-                        schema_name=get_corrected_name(parent_schema),
+                        database_name=get_corrected_name(parent_node.database),
+                        schema_name=get_corrected_name(parent_node.schema_),
                         table_name=table_name,
                     )
                     if filter_model.is_filtered:
@@ -1102,8 +1191,8 @@ class DbtSource(DbtServiceSource):
                             self.metadata,
                             entity_type=Table,
                             service_name=self.config.serviceName,
-                            database_name=get_corrected_name(parent_database),
-                            schema_name=get_corrected_name(parent_schema),
+                            database_name=get_corrected_name(parent_node.database),
+                            schema_name=get_corrected_name(parent_node.schema_),
                             table_name=table_name,
                         )
 
@@ -1126,8 +1215,7 @@ class DbtSource(DbtServiceSource):
         Method to parse the DBT columns
         """
         columns = []
-        # snapshot nodes default columns to None; treat as empty to avoid AttributeError
-        manifest_columns = manifest_node.columns or {}
+        manifest_columns = manifest_node.columns
         for key, manifest_column in manifest_columns.items():
             try:
                 logger.debug(f"Processing DBT column: {key}")
@@ -1157,13 +1245,17 @@ class DbtSource(DbtServiceSource):
                 if manifest_column.meta:
                     dbt_column_meta = DbtMeta(**manifest_column.meta)
                     logger.debug(f"Processing DBT column glossary: {key}")
-
-                    # Try flat structure first (Priority 1), fallback to nested datacatalog
+                    
+                    # Try flat structure first (Priority 1)
                     glossary_terms = dbt_column_meta.glossary
+                    # Fallback to nested structure (Priority 2)
                     if not glossary_terms and dbt_column_meta.datacatalog:
                         glossary_terms = dbt_column_meta.datacatalog.glossary
-
+                    
                     if glossary_terms:
+                        logger.debug(
+                            f"Found glossary terms for column {key}: {glossary_terms}"
+                        )
                         dbt_column_tag_list.extend(
                             get_tag_labels(
                                 metadata=self.metadata,
@@ -1173,36 +1265,6 @@ class DbtSource(DbtServiceSource):
                             )
                             or []
                         )
-
-                    column_tags = dbt_column_meta.tags
-                    if not column_tags and dbt_column_meta.datacatalog:
-                        column_tags = dbt_column_meta.datacatalog.tags
-
-                    if self.source_config.includeTags and column_tags:
-                        for tag_fqn in column_tags:
-                            if not tag_fqn:
-                                continue
-                            try:
-                                tag_parts = fqn.split(tag_fqn)
-                            except Exception as exc:  # pylint: disable=broad-except
-                                logger.debug(traceback.format_exc())
-                                logger.warning(
-                                    f"Failed to parse tag FQN {tag_fqn!r} for column"
-                                    f" {column_name}: {exc}"
-                                )
-                                continue
-                            if len(tag_parts) >= 2:
-                                classification_name = tag_parts[0]
-                                tag_name = fqn.FQN_SEPARATOR.join(tag_parts[1:])
-                                dbt_column_tag_list.extend(
-                                    get_tag_labels(
-                                        metadata=self.metadata,
-                                        tags=[tag_name],
-                                        classification_name=classification_name,
-                                        include_tags=self.source_config.includeTags,
-                                    )
-                                    or []
-                                )
 
                 columns.append(
                     Column(
@@ -1466,74 +1528,168 @@ class DbtSource(DbtServiceSource):
         """
         Extracts resource_tags value from dbt config() block.
         Handles BigQuery native format: config(resource_tags = {...})
+        
+        IMPORTANT: For BigQuery native resource_tags, place in config() block:
+        config(
+            resource_tags = {
+                'p-kaercher-lakehouse/confidentiality': "internal"
+            }
+        )
+        
+        Extracts the VALUE (e.g., "internal"), ignoring environment-specific keys
         """
         try:
             if not manifest_node:
+                logger.debug(f"[extract_resource_tags_from_config] manifest_node is None")
                 return None
+            
+            # Check config block (PRIMARY location for BigQuery native resource_tags)
             if hasattr(manifest_node, "config"):
                 config_obj = manifest_node.config
+                logger.debug(f"[extract_resource_tags_from_config] config object type: {type(config_obj).__name__}")
+                logger.debug(f"[extract_resource_tags_from_config] config object: {config_obj}")
+                
+                # Handle different config types
                 if config_obj is None:
-                    pass
+                    logger.debug(f"[extract_resource_tags_from_config] config is None")
                 elif isinstance(config_obj, dict):
+                    logger.debug(f"[extract_resource_tags_from_config] config is dict with keys: {list(config_obj.keys())}")
+                    
                     if "resource_tags" in config_obj:
                         resource_tags_value = config_obj["resource_tags"]
-                        if isinstance(resource_tags_value, dict) and resource_tags_value:
-                            for _, value in resource_tags_value.items():
-                                return value
+                        logger.info(f"[extract_resource_tags_from_config] ✓ Found 'resource_tags' key in config")
+                        logger.debug(f"[extract_resource_tags_from_config] resource_tags type: {type(resource_tags_value).__name__}")
+                        logger.debug(f"[extract_resource_tags_from_config] resource_tags value: {resource_tags_value}")
+                        
+                        if isinstance(resource_tags_value, dict):
+                            if resource_tags_value:
+                                # Get the first value (confidentiality level)
+                                for key, value in resource_tags_value.items():
+                                    logger.info(
+                                        f"[extract_resource_tags_from_config] ✓✓ SUCCESS! Extracted: key='{key}', value='{value}'"
+                                    )
+                                    return value
+                            else:
+                                logger.debug(f"[extract_resource_tags_from_config] resource_tags dict is empty")
+                        else:
+                            logger.warning(f"[extract_resource_tags_from_config] resource_tags is not a dict, it's {type(resource_tags_value).__name__}: {resource_tags_value}")
+                    else:
+                        logger.debug(f"[extract_resource_tags_from_config] 'resource_tags' key NOT found in config. Available keys: {list(config_obj.keys())}")
                 else:
+                    # Config object might be a custom class (not dict)
+                    logger.debug(f"[extract_resource_tags_from_config] config is not dict, trying as object with attributes")
                     if hasattr(config_obj, "resource_tags"):
                         resource_tags_value = getattr(config_obj, "resource_tags")
+                        logger.info(f"[extract_resource_tags_from_config] ✓ Found resource_tags as attribute on config object")
+                        logger.debug(f"[extract_resource_tags_from_config] resource_tags value: {resource_tags_value}")
+                        
                         if isinstance(resource_tags_value, dict) and resource_tags_value:
-                            for _, value in resource_tags_value.items():
+                            for key, value in resource_tags_value.items():
+                                logger.info(f"[extract_resource_tags_from_config] ✓✓ Extracted from config.resource_tags: key='{key}', value='{value}'")
                                 return value
-                    elif hasattr(config_obj, "meta"):
-                        meta_obj = getattr(config_obj, "meta")
-                        if isinstance(meta_obj, dict) and "resource_tags" in meta_obj:
-                            resource_tags_value = meta_obj.get("resource_tags")
-                            if resource_tags_value:
-                                return resource_tags_value
+                    else:
+                        logger.debug(f"[extract_resource_tags_from_config] config object has no 'resource_tags' attribute")
+                        
+                        # FALLBACK: Check config.meta.resource_tags (secondary location)
+                        if hasattr(config_obj, "meta"):
+                            meta_obj = getattr(config_obj, "meta")
+                            logger.debug(f"[extract_resource_tags_from_config] Checking config.meta for resource_tags (meta type: {type(meta_obj).__name__})")
+                            
+                            if isinstance(meta_obj, dict) and "resource_tags" in meta_obj:
+                                resource_tags_value = meta_obj.get("resource_tags")
+                                logger.info(f"[extract_resource_tags_from_config] ✓ Found resource_tags in config.meta")
+                                logger.debug(f"[extract_resource_tags_from_config] config.meta.resource_tags value: {resource_tags_value}")
+                                if resource_tags_value:
+                                    return resource_tags_value
+            else:
+                logger.debug(f"[extract_resource_tags_from_config] manifest_node has no 'config' attribute")
+            
+            logger.debug(f"[extract_resource_tags_from_config] ✗ No resource_tags found")
+            return None
+            
         except Exception as exc:
+            logger.error(f"[extract_resource_tags_from_config] Exception: {exc}")
             logger.debug(traceback.format_exc())
-            logger.warning(f"Error extracting resource_tags from config: {exc}")
-        return None
+            return None
 
     def _map_resource_tier(self, tier_value: str) -> Optional[str]:
         """
-        Maps tier values (Tier1-5 or display names) to canonical display names.
-        Returns None for invalid values.
+        Maps tier values to resource tag values with explicit validation.
+        
+        Valid inputs:
+        - Tier names: Tier1, Tier2, Tier3, Tier4, Tier5
+        - Display names: confidential-restricted, confidential-local, confidential-global, internal, public
+        
+        Returns:
+        - Mapped value if valid (all map to display names)
+        - None if invalid (with warning logged)
+        
+        Example:
+        - "Tier1" -> "confidential-restricted"
+        - "confidential-local" -> "confidential-local"
+        - "invalid-value" -> None (with warning)
         """
+        # Define valid tier values
         VALID_RESOURCE_TAGS = {
             "Tier1", "Tier2", "Tier3", "Tier4", "Tier5",
             "confidential-restricted", "confidential-local",
-            "confidential-global", "internal", "public",
+            "confidential-global", "internal", "public"
         }
+        
+        # Check if value is valid
         if tier_value not in VALID_RESOURCE_TAGS:
             logger.warning(
-                f"Invalid resource_tag value '{tier_value}' — must be one of: "
-                f"{sorted(VALID_RESOURCE_TAGS)}. Skipping."
+                f"[_map_resource_tier] ✗ INVALID resource_tag value '{tier_value}' "
+                f"— must be one of: {sorted(VALID_RESOURCE_TAGS)}. Skipping this tag."
             )
             return None
+        
+        # Mapping from tier names to display names
         tier_mapping = {
             "Tier1": "confidential-restricted",
             "Tier2": "confidential-local",
             "Tier3": "confidential-global",
             "Tier4": "internal",
             "Tier5": "public",
+            # Also accept display names directly (they map to themselves)
             "confidential-restricted": "confidential-restricted",
             "confidential-local": "confidential-local",
             "confidential-global": "confidential-global",
             "internal": "internal",
             "public": "public",
         }
-        return tier_mapping[tier_value]
+        
+        mapped_value = tier_mapping[tier_value]  # Safe lookup since we validated above
+        logger.debug(
+            f"[_map_resource_tier] ✓ Mapped resource_tier '{tier_value}' -> '{mapped_value}'"
+        )
+        return mapped_value
 
     def _convert_resource_tier_to_fqn(self, tier_value: Optional[str]) -> Optional[str]:
         """
-        Converts a resource tier display name to Tier classification FQN.
-        e.g. "confidential-restricted" -> "Tier.Tier1"
+        Converts resource tier value to FQN format for tagging.
+        Maps user-friendly values to the existing Tier classification tags:
+        - confidential-restricted -> Tier.Tier1
+        - confidential-local -> Tier.Tier2
+        - confidential-global -> Tier.Tier3
+        - internal -> Tier.Tier4
+        - public -> Tier.Tier5
+        - Tier1 -> Tier.Tier1
+        - Tier2 -> Tier.Tier2
+        - etc.
+        
+        Args:
+            tier_value: The validated tier value, or None if validation failed upstream
+            
+        Returns:
+            FQN string (e.g., 'Tier.Tier1') or None if input is None
         """
         if tier_value is None:
+            logger.warning(
+                "[_convert_resource_tier_to_fqn] Input tier_value is None, returning None"
+            )
             return None
+        
         tier_to_fqn = {
             "Tier1": "Tier.Tier1",
             "Tier2": "Tier.Tier2",
@@ -1546,7 +1702,11 @@ class DbtSource(DbtServiceSource):
             "internal": "Tier.Tier4",
             "public": "Tier.Tier5",
         }
-        return tier_to_fqn.get(tier_value, tier_value)
+        fqn_value = tier_to_fqn.get(tier_value, tier_value)
+        logger.debug(
+            f"Converted resource tier '{tier_value}' to FQN format: '{fqn_value}'"
+        )
+        return fqn_value
 
     def process_dbt_meta(self, manifest_node: Any, table_fqn: str):
         """
@@ -1562,16 +1722,20 @@ class DbtSource(DbtServiceSource):
             logger.info(f"[process_dbt_meta] ► Starting processing for table: {table_fqn}")
             logger.debug(f"[process_dbt_meta] manifest_meta keys: {list(manifest_meta.keys()) if manifest_meta else 'empty'}")
             logger.debug(f"[process_dbt_meta] has config: {hasattr(manifest_node, 'config')}")
-
-            # Extract glossary terms (Priority 1: flat, 2: nested datacatalog)
-            glossary = dbt_meta_info.glossary
-            if not glossary and dbt_meta_info.datacatalog:
-                glossary = dbt_meta_info.datacatalog.glossary
-            if glossary:
+            
+            # Extract glossary terms (Priority 1: flat, 2: nested)
+            glossary_terms = dbt_meta_info.glossary
+            if not glossary_terms and dbt_meta_info.datacatalog:
+                glossary_terms = dbt_meta_info.datacatalog.glossary
+                
+            if glossary_terms:
+                logger.debug(
+                    f"Found glossary terms: {glossary_terms}"
+                )
                 dbt_table_tags_list.extend(
                     get_tag_labels(
                         metadata=self.metadata,
-                        tags=glossary,
+                        tags=glossary_terms,
                         include_tags=True,
                         tag_type=GlossaryTerm,
                     )
@@ -1585,7 +1749,7 @@ class DbtSource(DbtServiceSource):
             resource_tag_value = self.extract_resource_tags_from_config(manifest_node)
             if resource_tag_value:
                 logger.info(f"[process_dbt_meta] ✓ Found resource_tags in config for {table_fqn}: '{resource_tag_value}'")
-
+            
             if not resource_tag_value:
                 resource_tag_value = dbt_meta_info.resource_tags
                 if resource_tag_value:
@@ -1594,27 +1758,56 @@ class DbtSource(DbtServiceSource):
                 resource_tag_value = dbt_meta_info.datacatalog.resource_tags
                 if resource_tag_value:
                     logger.info(f"[process_dbt_meta] ✓ Found resource_tags in nested datacatalog for {table_fqn}: '{resource_tag_value}'")
-
+                else:
+                    logger.debug(f"[process_dbt_meta] No resource_tags in datacatalog for {table_fqn}")
+            
             if not resource_tag_value:
                 logger.debug(f"[process_dbt_meta] ✗ No resource_tags found for {table_fqn} (checked all 3 priorities)")
-
+                
             if resource_tag_value:
+                logger.info(f"[process_dbt_meta] Processing resource_tag_value: '{resource_tag_value}' (type: {type(resource_tag_value).__name__})")
+                # Map user-friendly value to internal representation
                 mapped_tag = self._map_resource_tier(resource_tag_value)
-                if mapped_tag:
+                
+                # Check if mapping was successful (None means invalid value)
+                if mapped_tag is None:
+                    logger.warning(
+                        f"[process_dbt_meta] ✗ Skipping resource_tag for {table_fqn} due to invalid value '{resource_tag_value}'"
+                    )
+                else:
+                    # Convert to FQN format for tagging
                     fqn_tag = self._convert_resource_tier_to_fqn(mapped_tag)
+                    logger.info(
+                        f"[process_dbt_meta] ✓ Mapped resource_tags '{resource_tag_value}' -> '{mapped_tag}' -> FQN '{fqn_tag}' for table {table_fqn}"
+                    )
+                    
+                    # Parse the FQN format (ClassificationName.TagName)
                     tag_parts = fqn_tag.split(".", 1)
                     classification_name = tag_parts[0]
                     tag_name = tag_parts[1] if len(tag_parts) > 1 else fqn_tag
+                    
+                    logger.debug(
+                        f"Processing resource_tags: classification='{classification_name}', tag='{tag_name}'"
+                    )
+                    # Try get_tag_labels first (API lookup)
                     resource_tag_labels = get_tag_labels(
                         metadata=self.metadata,
                         tags=[tag_name],
                         classification_name=classification_name,
                         include_tags=True,
                     )
+                    logger.info(
+                        f"get_tag_labels returned: {resource_tag_labels} for classification='{classification_name}', tag='{tag_name}'"
+                    )
                     if resource_tag_labels:
                         dbt_table_tags_list.extend(resource_tag_labels)
+                        logger.info(f"✓ Added {len(resource_tag_labels)} resource tag labels via get_tag_labels (total: {len(dbt_table_tags_list)})")
                     else:
-                        # Fallback: construct TagLabel directly
+                        # Fallback: Directly construct TagLabel when get_tag_labels fails
+                        logger.warning(
+                            f"get_tag_labels returned empty for classification='{classification_name}', tag='{tag_name}'. "
+                            f"Constructing TagLabel directly as fallback."
+                        )
                         tag_label = TagLabel(
                             tagFQN=TagFQN(fqn_tag),
                             source=TagSource.Classification,
@@ -1622,49 +1815,53 @@ class DbtSource(DbtServiceSource):
                             state=State.Confirmed,
                         )
                         dbt_table_tags_list.append(tag_label)
+                        logger.info(f"✓ Created TagLabel directly with FQN '{fqn_tag}' (total: {len(dbt_table_tags_list)})")
 
-            # Extract businessProperties (Priority 1: flat, 2: nested datacatalog)
-            custom_props = dbt_meta_info.businessProperties
-            if not custom_props and dbt_meta_info.datacatalog:
-                custom_props = dbt_meta_info.datacatalog.businessProperties
-            if custom_props:
-                logger.debug(f"Found businessProperties: {list(custom_props.keys())}")
-                self.extracted_custom_properties[table_fqn] = custom_props
+            # Extract businessProperties (Priority 1: flat, 2: nested)
+            business_properties = dbt_meta_info.businessProperties
+            if not business_properties and dbt_meta_info.datacatalog:
+                business_properties = dbt_meta_info.datacatalog.businessProperties
+                
+            if business_properties:
+                logger.debug(
+                    f"Found businessProperties: {list(business_properties.keys())}"
+                )
+                # Store businessProperties mapped to table FQN
+                self.extracted_custom_properties[
+                    table_fqn
+                ] = business_properties
 
-            # Domain (Priority 1: flat, 2: nested datacatalog)
+            # Extract domain (Priority 1: flat, 2: nested)
             domain = dbt_meta_info.domain
             if not domain and dbt_meta_info.datacatalog:
                 domain = dbt_meta_info.datacatalog.domain
+                
             if domain:
                 logger.debug(f"Found domain: {domain}")
                 self.extracted_domains[table_fqn] = domain
 
-            # Tags (Priority 1: flat, 2: nested datacatalog)
-            tags_to_process = dbt_meta_info.tags
-            if not tags_to_process and dbt_meta_info.datacatalog:
-                tags_to_process = dbt_meta_info.datacatalog.tags
-            if self.source_config.includeTags and tags_to_process:
-                for tag_fqn in tags_to_process:
-                    if not tag_fqn:
-                        continue
-                    try:
-                        tag_parts = fqn.split(tag_fqn)
-                    except Exception as exc:  # pylint: disable=broad-except
-                        logger.debug(traceback.format_exc())
-                        logger.warning(
-                            f"Failed to parse tag FQN {tag_fqn!r} for table"
-                            f" {table_fqn}: {exc}"
-                        )
-                        continue
+            # Extract tags (Priority 1: flat, 2: nested)
+            tags_list = dbt_meta_info.tags
+            if not tags_list and dbt_meta_info.datacatalog:
+                tags_list = dbt_meta_info.datacatalog.tags
+                
+            if tags_list:
+                logger.debug(f"Found tags: {tags_list}")
+                for tag_fqn in tags_list:
+                    # Parse classification.tag format
+                    tag_parts = tag_fqn.split(fqn.FQN_SEPARATOR)
                     if len(tag_parts) >= 2:
                         classification_name = tag_parts[0]
                         tag_name = fqn.FQN_SEPARATOR.join(tag_parts[1:])
+                        logger.debug(
+                            f"Processing tag: {classification_name}.{tag_name}"
+                        )
                         dbt_table_tags_list.extend(
                             get_tag_labels(
                                 metadata=self.metadata,
                                 tags=[tag_name],
                                 classification_name=classification_name,
-                                include_tags=self.source_config.includeTags,
+                                include_tags=True,
                             )
                             or []
                         )
@@ -1673,45 +1870,13 @@ class DbtSource(DbtServiceSource):
             logger.debug(traceback.format_exc())
             logger.warning(f"Failed to process meta dbt Tags and GlossaryTerms: {exc}")
 
+        # Note: Tags are stored at the caller level (get_data_model) after combining
+        # manifest tags + meta tags to ensure all tags are collected before process_dbt_tags
+        logger.info(f"process_dbt_meta returning {len(dbt_table_tags_list)} tags for {table_fqn}")
+        for idx, tag in enumerate(dbt_table_tags_list):
+            tag_fqn_val = tag.tagFQN.root if hasattr(tag.tagFQN, 'root') else tag.tagFQN
+            logger.info(f"  [{idx+1}] Returning tag: {tag_fqn_val}")
         return dbt_table_tags_list or []
-
-    def process_dbt_tags(self, data_model_link: DataModelLink):
-        """
-        Method to process and apply DBT tags (including resource_tags) using patch API
-        """
-        table_entity: Table = data_model_link.table_entity
-
-        if not table_entity:
-            return
-
-        table_fqn = table_entity.fullyQualifiedName.root
-
-        try:
-            tags_list = self.extracted_tags.get(table_fqn, [])
-
-            if not tags_list:
-                return
-
-            updated_entity = self.metadata.patch_tags(
-                entity=Table,
-                source=table_entity,
-                tag_labels=tags_list,
-            )
-
-            if updated_entity:
-                logger.info(
-                    f"Applied {len(tags_list)} tags to table {table_fqn}"
-                )
-            else:
-                logger.warning(
-                    f"patch_tags returned None for table {table_fqn}"
-                )
-
-        except Exception as exc:
-            logger.warning(
-                f"Exception while processing tags for {table_fqn}: {exc}"
-            )
-            logger.debug(traceback.format_exc())
 
     def process_dbt_descriptions(self, data_model_link: DataModelLink):
         """
@@ -1781,28 +1946,60 @@ class DbtSource(DbtServiceSource):
         """
         table_entity: Table = data_model_link.table_entity
         if table_entity:
-            logger.debug(
-                f"Processing DBT owners for: {table_entity.fullyQualifiedName.root}"
-            )
+            table_fqn = table_entity.fullyQualifiedName.root
+            logger.info(f"[process_dbt_owners] Starting owner processing for: {table_fqn}")
             try:
                 data_model = data_model_link.datamodel
+                logger.debug(f"[process_dbt_owners] resourceType: {data_model.resourceType}")
+                logger.debug(f"[process_dbt_owners] dbtUpdateOwners config: {self.source_config.dbtUpdateOwners}")
+                
                 if (
                     data_model.resourceType != DbtCommonEnum.SOURCE.value
                     and self.source_config.dbtUpdateOwners
                 ):
-                    logger.debug(
-                        f"Overwriting owners with DBT owners: {table_entity.fullyQualifiedName.root}"
-                    )
+                    logger.info(f"[process_dbt_owners] ✓ Ready to update owners for {table_fqn}")
+                    
                     if data_model.owners:
+                        owner_count = len(data_model.owners.root) if hasattr(data_model.owners, 'root') else 1
+                        logger.info(
+                            f"[process_dbt_owners] ✓ Found {owner_count} owner(s) in data_model to apply"
+                        )
+                        if hasattr(data_model.owners, 'root'):
+                            for idx, owner in enumerate(data_model.owners.root):
+                                if owner:
+                                    owner_fqn = owner.fullyQualifiedName.root if (hasattr(owner, 'fullyQualifiedName') and owner.fullyQualifiedName) else str(owner) if owner else "None"
+                                    logger.debug(f"[process_dbt_owners]   [{idx+1}] {owner_fqn}")
+                                else:
+                                    logger.warning(f"[process_dbt_owners]   [{idx+1}] Owner is None!")
+                        
                         new_entity = deepcopy(table_entity)
                         new_entity.owners = data_model.owners
+                        
+                        # Detailed logging of what we're about to patch
+                        logger.info(f"[process_dbt_owners] ► Before patching:")
+                        logger.info(f"[process_dbt_owners]   Original entity owners: {table_entity.owners}")
+                        logger.info(f"[process_dbt_owners]   New entity owners to apply: {new_entity.owners}")
+                        if hasattr(new_entity.owners, 'root'):
+                            logger.info(f"[process_dbt_owners]   New entity owners.root length: {len(new_entity.owners.root)}")
+                            for idx, owner in enumerate(new_entity.owners.root):
+                                logger.info(f"[process_dbt_owners]     [{idx+1}] {owner}")
+                        
+                        logger.info(f"[process_dbt_owners] ✓ Setting {owner_count} owner(s) on entity and patching...")
                         yield Either(
                             right=PatchRequest(
                                 original_entity=table_entity,
                                 new_entity=new_entity,
-                                override_metadata=True,
+                                override_metadata=True,  # REPLACE to ensure all dbt owners are set
                             )
                         )
+                        logger.info(f"[process_dbt_owners] ✓✓✓ PATCHED {owner_count} owner(s) for {table_fqn}")
+                    else:
+                        logger.debug(f"[process_dbt_owners] No owners found in data_model.owners for {table_fqn}")
+                else:
+                    if data_model.resourceType == DbtCommonEnum.SOURCE.value:
+                        logger.debug(f"[process_dbt_owners] Skipping - resource is SOURCE type")
+                    if not self.source_config.dbtUpdateOwners:
+                        logger.debug(f"[process_dbt_owners] Skipping - dbtUpdateOwners is disabled")
 
             except Exception as exc:  # pylint: disable=broad-except
                 yield Either(
@@ -1832,7 +2029,10 @@ class DbtSource(DbtServiceSource):
                 )
                 if not check_test_definition_exists:
                     entity_type = EntityType.TABLE
-                    if get_manifest_column_name(manifest_node):
+                    if (
+                        hasattr(manifest_node, "column_name")
+                        and manifest_node.column_name
+                    ):
                         entity_type = EntityType.COLUMN
                     yield Either(
                         right=CreateTestDefinitionRequest(
@@ -1870,7 +2070,7 @@ class DbtSource(DbtServiceSource):
                 for entity_link_str in entity_link_list:
                     table_fqn = get_table_fqn(entity_link_str)
                     logger.debug(f"Table fqn found: {table_fqn}")
-                    source_elements = fqn.split(table_fqn)
+                    source_elements = table_fqn.split(fqn.FQN_SEPARATOR)
                     test_case_fqn = fqn.build(
                         self.metadata,
                         entity_type=TestCase,
@@ -1878,7 +2078,9 @@ class DbtSource(DbtServiceSource):
                         database_name=source_elements[1],
                         schema_name=source_elements[2],
                         table_name=source_elements[3],
-                        column_name=get_manifest_column_name(manifest_node),
+                        column_name=manifest_node.column_name
+                        if hasattr(manifest_node, "column_name")
+                        else None,
                         test_case_name=manifest_node.name,
                     )
 
@@ -1889,6 +2091,7 @@ class DbtSource(DbtServiceSource):
                     # Try direct API call via es_search_from_fqn as secondary check.
                     if test_case is None:
                         try:
+                            from metadata.utils.entity_link import get_entity_from_es_result
                             tc_list = get_entity_from_es_result(
                                 entity_list=self.metadata.es_search_from_fqn(
                                     entity_type=TestCase,
@@ -1902,7 +2105,7 @@ class DbtSource(DbtServiceSource):
                                     logger.debug(
                                         f"Test case Already Exists (ES fallback): {test_case_fqn}"
                                     )
-                        except Exception:  # pylint: disable=broad-except
+                        except Exception:
                             pass
                     if test_case is None:
                         # Create the test case only if it does not exist
@@ -1946,16 +2149,6 @@ class DbtSource(DbtServiceSource):
                 if not dbt_test_result:
                     logger.warning(
                         f"DBT Test Case Results not found for node: {manifest_node.name}"
-                    )
-                    return
-
-                # Skip compiled-only entries: `dbt run` includes test nodes in
-                # run_results.json with status="success" but message=null since
-                # no test SQL was executed. Real results always have a message.
-                if not dbt_test_result.message:
-                    logger.debug(
-                        "Skipping compiled-only test result for '%s' (message is null).",
-                        manifest_node.name,
                     )
                     return
 
@@ -2008,7 +2201,7 @@ class DbtSource(DbtServiceSource):
 
                 # Create the test case fqns and add the results
                 for table_fqn in dbt_test.get(DbtCommonEnum.UPSTREAM.value):
-                    source_elements = fqn.split(table_fqn)
+                    source_elements = table_fqn.split(fqn.FQN_SEPARATOR)
                     test_case_fqn = fqn.build(
                         self.metadata,
                         entity_type=TestCase,
@@ -2016,7 +2209,9 @@ class DbtSource(DbtServiceSource):
                         database_name=source_elements[1],
                         schema_name=source_elements[2],
                         table_name=source_elements[3],
-                        column_name=get_manifest_column_name(manifest_node),
+                        column_name=manifest_node.column_name
+                        if hasattr(manifest_node, "column_name")
+                        else None,
                         test_case_name=manifest_node.name,
                     )
 

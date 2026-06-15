@@ -228,14 +228,13 @@ class DbtServiceSource(TopologyRunnerMixin, Source, ABC):
                 if value.get("columns"):
                     for _, value in value["columns"].items():
                         if value.get("constraints"):
-                            for constraint in value["constraints"]:
-                                keys_to_delete = [
-                                    key
-                                    for key in constraint
-                                    if key.lower() not in REQUIRED_CONSTRAINT_KEYS
-                                ]
-                                for key in keys_to_delete:
-                                    del constraint[key]
+                            keys_to_delete = [
+                                key
+                                for key in value
+                                if key.lower() not in REQUIRED_CONSTRAINT_KEYS
+                            ]
+                            for key in keys_to_delete:
+                                del value[key]
                         else:
                             value["constraints"] = None
 
