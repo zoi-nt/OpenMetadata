@@ -139,6 +139,11 @@ class DbtServiceTopology(ServiceTopology):
                 processor="process_dbt_domain",
                 nullable=True,
             ),
+            NodeStage(
+                type_=DataModelLink,
+                processor="process_dbt_tags",
+                nullable=True,
+            ),
         ],
     )
     process_dbt_tests: Annotated[
@@ -223,14 +228,13 @@ class DbtServiceSource(TopologyRunnerMixin, Source, ABC):
                 if value.get("columns"):
                     for _, value in value["columns"].items():
                         if value.get("constraints"):
-                            for constraint in value["constraints"]:
-                                keys_to_delete = [
-                                    key
-                                    for key in constraint
-                                    if key.lower() not in REQUIRED_CONSTRAINT_KEYS
-                                ]
-                                for key in keys_to_delete:
-                                    del constraint[key]
+                            keys_to_delete = [
+                                key
+                                for key in value
+                                if key.lower() not in REQUIRED_CONSTRAINT_KEYS
+                            ]
+                            for key in keys_to_delete:
+                                del value[key]
                         else:
                             value["constraints"] = None
 
@@ -403,6 +407,12 @@ class DbtServiceSource(TopologyRunnerMixin, Source, ABC):
     def process_dbt_custom_properties(self, data_model_link: DataModelLink):
         """
         Method to process DBT custom properties using patch APIs
+        """
+
+    @abstractmethod
+    def process_dbt_tags(self, data_model_link: DataModelLink):
+        """
+        Method to process and apply DBT tags (including resource_tags) using patch APIs
         """
 
     def is_filtered(

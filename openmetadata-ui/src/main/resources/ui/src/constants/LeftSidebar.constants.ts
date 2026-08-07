@@ -121,6 +121,13 @@ export const SIDEBAR_LIST: Array<LeftSidebarItem> = [
     dataTestId: `app-bar-item-${SidebarItem.DATA_INSIGHT}`,
   },
   {
+    key: ROUTES.DOMAIN,
+    title: 'label.domain-plural',
+    redirect_url: ROUTES.DOMAIN,
+    icon: DomainsIcon,
+    dataTestId: `app-bar-item-${SidebarItem.DOMAIN}`,
+  },
+  {
     key: ROUTES.DATA_MARKETPLACE_SECTION,
     title: 'label.data-marketplace-section',
     icon: MarketplaceIcon,
@@ -132,13 +139,6 @@ export const SIDEBAR_LIST: Array<LeftSidebarItem> = [
         icon: OverviewIcon,
         redirect_url: ROUTES.DATA_MARKETPLACE,
         dataTestId: `app-bar-item-${SidebarItem.DATA_MARKETPLACE}`,
-      },
-      {
-        key: ROUTES.DOMAIN,
-        title: 'label.domain-plural',
-        redirect_url: ROUTES.DOMAIN,
-        icon: DomainsIcon,
-        dataTestId: `app-bar-item-${SidebarItem.DOMAIN}`,
       },
       {
         key: ROUTES.DATA_PRODUCT,

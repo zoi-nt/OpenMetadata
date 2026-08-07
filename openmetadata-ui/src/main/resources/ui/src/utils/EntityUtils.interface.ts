@@ -77,7 +77,7 @@ export enum FormattedDatabaseServiceType {
   Clickhouse = 'Clickhouse',
   Cockroach = 'Cockroach',
   Couchbase = 'Couchbase',
-  CustomDatabase = 'Custom Database',
+  CustomDatabase = 'Others',
   Databricks = 'Databricks',
   Datalake = 'Datalake',
   Db2 = 'Db2',

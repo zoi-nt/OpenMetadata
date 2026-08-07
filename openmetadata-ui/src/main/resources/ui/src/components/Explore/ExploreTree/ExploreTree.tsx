@@ -73,7 +73,7 @@ const ExploreTreeTitle = ({ node }: { node: ExploreTreeNode }) => {
             'm-l-xss': node.data?.isRoot,
           })}
           data-testid={`explore-tree-title-${node.data?.dataId ?? node.title}`}>
-          {node.title}
+          {node.title === 'customdatabase' ? 'others' : node.title}
         </Typography.Text>
         {!isUndefined(node.count) && (
           <span className="explore-node-count">

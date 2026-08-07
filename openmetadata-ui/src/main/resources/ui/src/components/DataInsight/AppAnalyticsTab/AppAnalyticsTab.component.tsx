@@ -11,6 +11,7 @@
  *  limitations under the License.
  */
 import { Col, Row } from 'antd';
+import { useApplicationStore } from '../../../hooks/useApplicationStore';
 import { useDataInsightProvider } from '../../../pages/DataInsightPage/DataInsightProvider';
 import DailyActiveUsersChart from '../DailyActiveUsersChart';
 import PageViewsByEntitiesChart from '../PageViewsByEntitiesChart';
@@ -19,6 +20,8 @@ import TopViewEntities from '../TopViewEntities';
 
 const AppAnalyticsTab = () => {
   const { chartFilter, selectedDaysFilter } = useDataInsightProvider();
+
+  const { currentUser } = useApplicationStore();
 
   return (
     <Row gutter={[16, 16]}>
@@ -38,7 +41,7 @@ const AppAnalyticsTab = () => {
         />
       </Col>
       <Col span={24}>
-        <TopActiveUsers chartFilter={chartFilter} />
+        {currentUser?.isAdmin && <TopActiveUsers chartFilter={chartFilter} />}
       </Col>
     </Row>
   );

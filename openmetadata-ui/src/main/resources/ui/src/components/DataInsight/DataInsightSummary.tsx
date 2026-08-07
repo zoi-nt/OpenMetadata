@@ -24,6 +24,7 @@ import {
 } from '../../generated/dataInsight/dataInsightChartResult';
 import { MostActiveUsers } from '../../generated/dataInsight/type/mostActiveUsers';
 import { Team } from '../../generated/entity/teams/team';
+import { useApplicationStore } from '../../hooks/useApplicationStore';
 import {
   ChartFilter,
   DataInsightTabs,
@@ -56,6 +57,8 @@ const DataInsightSummary: FC<Props> = ({ chartFilter, onScrollToChart }) => {
     tab: DataInsightTabs;
   }>();
 
+  const { currentUser } = useApplicationStore();
+
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [webCharts, setWebCharts] = useState<
     (DataInsightChartResult | undefined)[]
@@ -82,7 +85,7 @@ const DataInsightSummary: FC<Props> = ({ chartFilter, onScrollToChart }) => {
     try {
       const data = await getTeamByName('Organization');
       setOrganizationDetails(data);
-    } catch (err) {
+    } catch {
       // for this API do not show the toast message
     }
   };
@@ -172,9 +175,13 @@ const DataInsightSummary: FC<Props> = ({ chartFilter, onScrollToChart }) => {
   }, []);
 
   useEffect(() => {
-    tab === DataInsightTabs.DATA_ASSETS && fetchEntitiesChartData();
-    tab === DataInsightTabs.APP_ANALYTICS && fetchMostActiveUser();
-    tab === DataInsightTabs.APP_ANALYTICS && fetchWebChartData();
+    if (tab === DataInsightTabs.DATA_ASSETS) {
+      fetchEntitiesChartData();
+    }
+    if (tab === DataInsightTabs.APP_ANALYTICS) {
+      fetchMostActiveUser();
+      fetchWebChartData();
+    }
   }, [chartFilter, tab]);
 
   return (
@@ -232,7 +239,7 @@ const DataInsightSummary: FC<Props> = ({ chartFilter, onScrollToChart }) => {
             ))}
 
             {/* summary of most active user */}
-            {mostActiveUser?.userName && (
+            {mostActiveUser?.userName && currentUser?.isAdmin && (
               <Col
                 className="data-insight-active-user"
                 data-testid={`summary-item-${DataInsightChartType.MostActiveUsers}`}
