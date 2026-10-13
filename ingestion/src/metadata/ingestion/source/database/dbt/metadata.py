@@ -1631,8 +1631,8 @@ class DbtSource(DbtServiceSource):
         """
         # Define valid tier values
         VALID_RESOURCE_TAGS = {
-            "Tier1", "Tier2", "Tier3", "Tier4", "Tier5",
-            "confidential-restricted", "confidential-local",
+            "Tier1", "Tier2", "Tier2-default", "Tier3", "Tier4", "Tier5",
+            "confidential-restricted", "confidential-local", "confidential-local-default",
             "confidential-global", "internal", "public"
         }
         
@@ -1648,12 +1648,14 @@ class DbtSource(DbtServiceSource):
         tier_mapping = {
             "Tier1": "confidential-restricted",
             "Tier2": "confidential-local",
+            "Tier2-default": "confidential-local-default",
             "Tier3": "confidential-global",
             "Tier4": "internal",
             "Tier5": "public",
             # Also accept display names directly (they map to themselves)
             "confidential-restricted": "confidential-restricted",
             "confidential-local": "confidential-local",
+            "confidential-local-default": "confidential-local-default",
             "confidential-global": "confidential-global",
             "internal": "internal",
             "public": "public",
@@ -1671,11 +1673,13 @@ class DbtSource(DbtServiceSource):
         Maps user-friendly values to the existing Tier classification tags:
         - confidential-restricted -> Tier.Tier1
         - confidential-local -> Tier.Tier2
+        - confidential-local-default -> Tier.Tier2-default
         - confidential-global -> Tier.Tier3
         - internal -> Tier.Tier4
         - public -> Tier.Tier5
         - Tier1 -> Tier.Tier1
         - Tier2 -> Tier.Tier2
+        - Tier2-default -> Tier.Tier2-default
         - etc.
         
         Args:
@@ -1693,11 +1697,13 @@ class DbtSource(DbtServiceSource):
         tier_to_fqn = {
             "Tier1": "Tier.Tier1",
             "Tier2": "Tier.Tier2",
+            "Tier2-default": "Tier.Tier2-default",
             "Tier3": "Tier.Tier3",
             "Tier4": "Tier.Tier4",
             "Tier5": "Tier.Tier5",
             "confidential-restricted": "Tier.Tier1",
             "confidential-local": "Tier.Tier2",
+            "confidential-local-default": "Tier.Tier2-default",
             "confidential-global": "Tier.Tier3",
             "internal": "Tier.Tier4",
             "public": "Tier.Tier5",
